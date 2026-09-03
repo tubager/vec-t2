@@ -1,0 +1,58 @@
+n_genes: 32285
+n_submit: 3000
+n_submit_min: 1000
+n_submit_max: 5118
+pca_dim: 64
+pca_fit_cells: 8000
+pca_batch: 256
+hvg: null
+seed: 0
+
+paths:
+  adata_85: data/E8.5_RNA.h5ad
+  adata_95: data/E9.5_RNA.h5ad
+  panel: panels/T1__val.genes.txt
+  panel_fallback: outputs/t1/gene_order.txt
+  audit: outputs/t1/audit.json
+  pca: outputs/t1/pca.joblib
+  composition: outputs/t1/composition.json
+  ckpt: outputs/t1/ckpt/flow.pt
+  preds: outputs/t1/preds
+
+flow:
+  hidden: [256, 256]
+  emb_dim: 16
+  lr: 1.0e-3
+  batch_pairs: 256
+  epochs: 200
+  delta_t_unit: 1.0
+  z_noise: 0.05
+  euler_steps: 10
+  mmd_weight: 0.0
+  lfc_weight: 0.0
+  var_weight: 0.0
+
+time:
+  t_85: 8.5
+  t_95: 9.5
+  t_105: 10.5
+  t_125: 12.5
+
+shift:
+  mode: repeat_last_delta
+  clip_min: 0.0
+  alpha_105: 1.0
+  alpha_125: 3.0
+
+composition:
+  rho: 1.2
+  pi_max: 0.25
+  eps: 1.0e-6
+  sigma_birth: 0.5
+
+expected:
+  n_obs_85: 16787
+  n_obs_95: 17057
+  n_vars: 32285
+  n_types_85: 18
+  n_types_95: 21

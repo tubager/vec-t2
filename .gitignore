@@ -1,0 +1,20 @@
+# Training / inference artifacts
+outputs/
+
+# AnnData
+*.h5ad
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

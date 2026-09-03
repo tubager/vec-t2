@@ -1,0 +1,89 @@
+n_submit: 3000
+pca_dim: 32              # 500 基因不需要 T1 的 64
+pca_fit_cells: 8000
+pca_batch: 256
+seed: 0
+knn_k: 15                # 与官方 NFS 一致
+jitter_frac: 0.15        # 相对中位 kNN 距
+
+paths:
+  embryo:
+    E6.75: data/E6.75.h5ad
+    E7.25: data/E7.25.h5ad
+    E8.0: data/E8.0.h5ad
+    panel_val_interp: panels/T2__embryo__val_interp.genes.txt
+  heart:
+    E8.25: data/E8.25_late.h5ad
+    E8.75: data/E8.75.h5ad
+    E9.5: data/E9.5.h5ad
+    panel_val_interp: panels/T2__heart__val_interp.genes.txt
+    panel_val_extrap: panels/T2__heart__val_extrap.genes.txt
+  preds: outputs/t2
+  t1_delta: outputs/t1/delta.npy
+  t1_genes: outputs/t1/gene_order.txt
+
+time:
+  embryo: {t_675: 6.75, t_725: 7.25, t_75: 7.5, t_775: 7.75, t_80: 8.0}
+  heart:  {t_825: 8.25, t_85: 8.5, t_875: 8.75, t_95: 9.5, t_105: 10.5, t_125: 12.5}
+
+growth:
+  metric: rms_radius     # 不要用包围盒
+  embryo_interp_anchors: [7.25, 8.0]
+  heart_interp_anchors: [8.25, 8.75]
+  heart_extrap_anchor: 9.5
+  heart_extrap_beta_105: 0.0    # 第一版：不加跨 FOV 斜率
+  heart_extrap_alpha_105: 1.0   # 相对 β 的步长，用线上 TSR 调
+  heart_extrap_alpha_125: null  # P3 再用验证集选
+  heart_extrap_beta_125: null
+
+shape:
+  mode: anisotropic      # 胚胎代理 SDD/ODS 已优于 isotropic；心脏外推时轴比等于锚点，等价各向同性
+  mix_anchors: false     # true: 插值时按 w 混合两侧点云（会叠两个胚胎）
+  rescale_after_place: true  # 按簇抽样后把整云再缩到 r_target（修 TSR）
+  allow_tps: false       # 本地各向异性已赢 SDD/ODS，P2 不上 TPS
+  tps_n: 800             # OT 配对点数（仅 tps）
+
+shift:
+  clip_min: 0.0
+  per_cluster: true      # full：每工作簇自己的均值差，缺一侧则回退全局 Δ
+  t1_delta_weight: 0.0   # 心脏外推：T1 Δ 投影到 panel 的凸组合权重
+
+composition:
+  eps: 1.0e-6
+  sigma_birth: 0.05      # 出生簇在表达上加的高斯噪声（panel 空间）
+  mix_expr: false        # false：插值从最近几何锚成对采样，不混右锚细胞
+
+flow:
+  use: false             # 本地 MMD 优于 shift 才打开；打开前先跑 15_train_flow_t2.py
+  hidden: [128, 128]
+  emb_dim: 16
+  euler_steps: 10
+  lr: 1.0e-3
+  batch_pairs: 256
+  epochs: 200
+  z_noise: 0.05
+  mmd_weight: 0.0
+  t_scale_embryo: 2.0    # 覆盖 E6.75–E8.0
+  t_scale_heart: 4.0     # 覆盖 E8.25–E12.5
+
+leaderboards:
+  embryo_val_interp:
+    n_genes: 498
+    n_min: 583
+    n_max: 5000
+  heart_val_interp:
+    n_genes: 500
+    n_min: 1000
+    n_max: 17616
+  heart_val_extrap:
+    n_genes: 500
+    n_min: 1000
+    n_max: 25179
+
+expected:
+  E6.75: {n_obs: 7093, n_vars: 498, n_types: 18, rms: 122.7}
+  E7.25: {n_obs: 13295, n_vars: 498, n_types: 18, rms: 147.3}
+  E8.0: {n_obs: 31671, n_vars: 500, n_types: 26, rms: 326.6}
+  E8.25: {n_obs: 58716, n_vars: 500, n_types: 33, rms: 354.1, bytes: 225091568}
+  E8.75: {n_obs: 24826, n_vars: 500, n_types: 33, rms: 216.9}
+  E9.5: {n_obs: 53742, n_vars: 500, n_types: 22, rms: 335.0}
