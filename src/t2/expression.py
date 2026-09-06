@@ -257,12 +257,16 @@ def sample_paired_cells(
     progenitors: dict[str, str] | None = None,
     birth: frozenset[str] | None = None,
     sigma_birth: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Draw (X, xyz) from the same source cell whenever the cluster exists on geom_stage.
 
     Birth / missing clusters take xyz from the progenitor on `geom_stage` and X
     from any stage that actually has the cluster. Never samples xyz from the
     whole-embryo blob.
+
+    Returns ``(X, xyz, cluster, expr_stage)``. ``expr_stage`` is the library
+    each row was drawn from, so mixed-anchor interpolations can apply ``+wΔ``
+    to left-anchor cells and ``+(w−1)Δ`` to right-anchor cells.
     """
     progenitors = progenitors or {}
     birth = birth or frozenset()
@@ -303,7 +307,7 @@ def sample_paired_cells(
                 return parts
         return []
 
-    rows_x, rows_xyz, rows_cl = [], [], []
+    rows_x, rows_xyz, rows_cl, rows_src = [], [], [], []
     for cluster, count in alloc.items():
         xyz_src = _xyz_pool(cluster)
         expr_src = _expr_pool(cluster)
@@ -316,12 +320,13 @@ def sample_paired_cells(
             w = np.ones(len(expr_src), dtype=np.float64)
         w = w / w.sum()
         n_from = rng.multinomial(count, w)
-        x_chunks, y_chunks = [], []
+        x_chunks, y_chunks, src_chunks = [], [], []
         for (st, idx, _), n_i in zip(expr_src, n_from):
             if n_i == 0:
                 continue
             take = rng.choice(idx, size=n_i, replace=len(idx) < n_i)
             x_chunks.append(stage_X[st][take])
+            src_chunks.append(np.full(n_i, st, dtype=object))
             if st == xyz_stage:
                 y_chunks.append(stage_xyz[st][take])
             else:
@@ -334,11 +339,13 @@ def sample_paired_cells(
         rows_x.append(np.asarray(x, dtype=np.float32))
         rows_xyz.append(np.asarray(xyz, dtype=np.float32))
         rows_cl.append(np.full(count, cluster, dtype=object))
+        rows_src.append(np.concatenate(src_chunks, axis=0))
 
     return (
         np.concatenate(rows_x, axis=0),
         np.concatenate(rows_xyz, axis=0),
         np.concatenate(rows_cl, axis=0),
+        np.concatenate(rows_src, axis=0),
     )
 
 

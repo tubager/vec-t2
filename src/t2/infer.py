@@ -269,6 +269,8 @@ def generate(
     method: str = "full",
     shape_mode: str | None = None,
     mix_anchors: bool | None = None,
+    mix_expr: bool | None = None,
+    no_delta: bool = False,
     composition: CompositionT2 | None = None,
     use_flow: bool = False,
     pca=None,
@@ -320,7 +322,7 @@ def generate(
     if got != n:
         raise RuntimeError(f"allocation {got} != n {n}")
 
-    mix_expr = bool((cfg.get("composition") or {}).get("mix_expr", False))
+    mix_expr = bool((cfg.get("composition") or {}).get("mix_expr", False)) if mix_expr is None else bool(mix_expr)
     per_cluster = bool((cfg.get("shift") or {}).get("per_cluster", True))
     rescale_after = bool((cfg.get("shape") or {}).get("rescale_after_place", True))
     progs = birth_progenitor(spec.setting)
@@ -396,7 +398,7 @@ def generate(
         else:
             stage_xyz[name] = transform_cloud(C, r_star, mode=geom_mode, axis_std_target=axis_tgt)
 
-    X, xyz, expr_clusters = sample_paired_cells(
+    X, xyz, expr_clusters, expr_src = sample_paired_cells(
         stage_X,
         stage_xyz,
         stage_cl,
@@ -424,16 +426,37 @@ def generate(
             steps=int(cfg.get("flow", {}).get("euler_steps") or 10),
         )
 
-    if per_cluster and delta_by_k is not None:
-        X = apply_cluster_delta(X, expr_clusters, global_delta, delta_by_k, alpha, clip)
-    else:
-        X = add_delta(X, global_delta, alpha=alpha, clip_min=clip)
+    if not no_delta:
+        mixed = spec.mode == "interp" and len([s for s, w in expr_w.items() if w > 0]) > 1
+        if mixed:
+            w_delta = interp_weight(spec.t_left, spec.t_right, spec.t)
+            X_out = np.empty_like(X)
+            for st in np.unique(expr_src):
+                mask = expr_src == st
+                if st == spec.right:
+                    a = float(w_delta) - 1.0
+                elif st == spec.left:
+                    a = float(w_delta)
+                else:
+                    a = float(alpha)
+                if per_cluster and delta_by_k is not None:
+                    X_out[mask] = apply_cluster_delta(
+                        X[mask], expr_clusters[mask], global_delta, delta_by_k, a, clip
+                    )
+                else:
+                    X_out[mask] = add_delta(X[mask], global_delta, alpha=a, clip_min=clip)
+            X = X_out
+        elif per_cluster and delta_by_k is not None:
+            X = apply_cluster_delta(X, expr_clusters, global_delta, delta_by_k, alpha, clip)
+        else:
+            X = add_delta(X, global_delta, alpha=alpha, clip_min=clip)
 
     if rescale_after:
         xyz = scale_cloud(xyz, r_star)
     xyz = add_jitter(xyz, rng, jitter)
     if rescale_after:
         xyz = scale_cloud(xyz, r_star)
+    X = np.clip(np.asarray(X, dtype=np.float32), clip, None)
     return _finalize(X, xyz, panel, spec)
 
 

@@ -37,6 +37,16 @@ def main() -> int:
     )
     parser.add_argument("--shape", choices=["isotropic", "anisotropic", "tps"], default=None)
     parser.add_argument("--mix-anchors", action="store_true")
+    parser.add_argument(
+        "--mix-expr",
+        action="store_true",
+        help="full/interp: mix left+right expression libraries by time weight; apply +wΔ / +(w-1)Δ per source",
+    )
+    parser.add_argument(
+        "--no-delta",
+        action="store_true",
+        help="full: skip residual Δ (extrap: composition + cluster place + scale only)",
+    )
     parser.add_argument("--use-flow", action="store_true", help="full method only: panel OT-CFM then residual shift")
     parser.add_argument("--jitter", type=float, default=None, help="override jitter_frac (relative to median NN)")
     parser.add_argument("--out", type=str, default=None)
@@ -90,6 +100,8 @@ def main() -> int:
         method=args.method,
         shape_mode=args.shape,
         mix_anchors=True if args.mix_anchors else None,
+        mix_expr=True if args.mix_expr else None,
+        no_delta=bool(args.no_delta),
         composition=composition,
         use_flow=use_flow,
         pca=pca,
@@ -103,6 +115,10 @@ def main() -> int:
         tag = f"full_{(args.shape or cfg.get('shape', {}).get('mode') or 'isotropic')}"
         if use_flow:
             tag = f"{tag}_flow"
+        if args.mix_expr:
+            tag = f"{tag}_mixexpr"
+        if args.no_delta:
+            tag = f"{tag}_nodelta"
         if args.jitter is not None:
             tag = f"{tag}_j{args.jitter:g}"
     default_name = f"pred_E{args.target:g}_{tag}.h5ad"

@@ -31,7 +31,7 @@ growth:
   embryo_interp_anchors: [7.25, 8.0]
   heart_interp_anchors: [8.25, 8.75]
   heart_extrap_anchor: 9.5
-  heart_extrap_beta_105: 0.0    # 第一版：不加跨 FOV 斜率
+  heart_extrap_beta_105: 0.268  # 官方 copy_last TSR≈−0.268，β=−TSR；目标 RMS≈438
   heart_extrap_alpha_105: 1.0   # 相对 β 的步长，用线上 TSR 调
   heart_extrap_alpha_125: null  # P3 再用验证集选
   heart_extrap_beta_125: null
