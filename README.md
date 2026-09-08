@@ -2,7 +2,7 @@
 
 NeurIPS 2026 [Virtual Embryo Challenge](https://virtualembryo.ai/challenge) 代码。Task 1：由 E8.5 / E9.5 全转录组预测未来阶段的细胞表达分布。Task 2：3D MERFISH 的时空预测（表达 + `spatial_3D`），胚胎与心脏两个 setting 分开建模。
 
-详细设计见 [doc/t1_technical_plan.md](doc/t1_technical_plan.md)、[doc/t2_technical_plan.md](doc/t2_technical_plan.md)，三项任务总计划见 [doc/model_training_plan.md](doc/model_training_plan.md)。T2 OT-CFM 本地评估见 [doc/t2_flow_eval.md](doc/t2_flow_eval.md)。P2 验证榜提交记录见 [doc/t2_p2_val_2026-09-05.md](doc/t2_p2_val_2026-09-05.md)。
+详细设计见 [doc/t1_technical_plan.md](doc/t1_technical_plan.md)、[doc/t2_technical_plan_v2.md](doc/t2_technical_plan_v2.md)（当前；[v1](doc/t2_technical_plan.md) 为 09-02 历史稿），三项任务总计划见 [doc/model_training_plan.md](doc/model_training_plan.md)。T2 OT-CFM 本地评估见 [doc/t2_flow_eval.md](doc/t2_flow_eval.md)。P2 验证榜提交记录见 [doc/t2_p2_val_2026-09-05.md](doc/t2_p2_val_2026-09-05.md)。P2 冲榜日记见 [doc/t2_p2_plan_2026-09-07.md](doc/t2_p2_plan_2026-09-07.md)。
 
 所有命令都在**项目根目录**执行。原始 `.h5ad` 放在 `data/`。
 
@@ -184,7 +184,7 @@ outputs/t1/preds/        预测文件（可提交）
 
 仓库**不包含**已训练的 OT-CFM 权重。不带 `--use-flow` 的基线与 `full` 可以直接跑；要用 flow 必须先完成本节第 4 步。
 
-详细设计见 [doc/t2_technical_plan.md](doc/t2_technical_plan.md)。
+当前方案见 [doc/t2_technical_plan_v2.md](doc/t2_technical_plan_v2.md)。09-02 从零地板稿见 [doc/t2_technical_plan.md](doc/t2_technical_plan.md)（不要当默认推理改）。
 
 ---
 
@@ -433,6 +433,9 @@ python scripts/13_predict_t2.py --setting heart --target 12.5 --method full
 | `--mix-anchors` | 插值时按时间权重混合两侧点云（会叠两个胚胎，默认关） |
 | `--use-flow` | panel PCA 上类型内 OT-CFM，再加残差 Δ；P2 不要交 |
 | `--jitter` | 覆盖 `jitter_frac`（消融用；默认 0.15 已够） |
+| `--dens-keep` | kNN 密度核截尾后再 OT-place（本地已否，不要交） |
+| `--crop-to-rms` | 左云 FOV 半径截后 OT-place 到核上（**保留 pick X**） |
+| `--crop-rms` | 截到的目标 RMS（默认 log 线性；心脏插值用 **255**） |
 
 其它参数：`--n 3000`、`--out path.h5ad`、`--seed 0`。
 
@@ -459,9 +462,9 @@ python scripts/14_score_local_t2.py --proxy heart_interp_gate \
 
 | 榜单 | skill | 上传这个文件 |
 |------|-------|----------------|
-| `T2:embryo:val_interp` | 61.93 | `outputs/t2/submit/T2_embryo_val_interp.h5ad` |
+| `T2:embryo:val_interp` | 65.12 | `outputs/t2/submit/T2_embryo_val_interp.h5ad` |
 | `T2:heart:val_interp` | 64.58 | `outputs/t2/submit/T2_heart_val_interp.h5ad` |
-| `T2:heart:val_extrap` | 53.3 | `outputs/t2/submit/T2_heart_val_extrap.h5ad` |
+| `T2:heart:val_extrap` | 54.15 | `outputs/t2/submit/T2_heart_val_extrap.h5ad` |
 
 P3（约 2026-10-20）验证答案放出后，用真值重训组成、β、α；每个 setting 的测试只留 2 个版本（稳健：scale+shift+按簇；激进：+TPS/flow 仅当验证集门控通过）。
 

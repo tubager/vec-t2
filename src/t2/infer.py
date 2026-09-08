@@ -22,7 +22,7 @@ from t2.expression import (
     shift_scale,
     transport_expression,
 )
-from t2.geometry import axis_stds, rms_radius, scale_cloud
+from t2.geometry import axis_stds, canonicalize, rms_radius, scale_cloud
 from t2.growth import axis_interp, interp_weight, r_interp, target_rms
 from t2.io import (
     assert_t2_submission,
@@ -35,8 +35,20 @@ from t2.io import (
     write_t2,
 )
 from t2.neighborhood import add_jitter
+from t2.ot import ot_interpolate_alloc
 from t2.paths import ROOT, resolve
-from t2.shape import nearest_side, ot_interpolate_clouds, transform_cloud
+from t2.shape import (
+    crop_place_xyz,
+    dens_keep_cloud,
+    match_axis_flips,
+    nearest_side,
+    occupancy_interpolate_cloud,
+    ot_assign_xyz,
+    ot_interpolate_clouds,
+    radius_crop_indices,
+    radius_crop_resample,
+    transform_cloud,
+)
 
 
 @dataclass
@@ -270,6 +282,12 @@ def generate(
     shape_mode: str | None = None,
     mix_anchors: bool | None = None,
     mix_expr: bool | None = None,
+    mix_xyz: str = "paired",
+    geom_src: str | None = None,
+    ot_interp: bool = False,
+    ot_xyz: str = "lerp",
+    ot_x: str = "lerp",
+    ot_w: float | None = None,
     no_delta: bool = False,
     composition: CompositionT2 | None = None,
     use_flow: bool = False,
@@ -277,8 +295,15 @@ def generate(
     flow_model=None,
     trained_clusters: set[str] | None = None,
     jitter_frac: float | None = None,
+    dens_keep: float | None = None,
+    crop_to_rms: bool = False,
+    crop_rms: float | None = None,
+    ot_n_pair: int | None = None,
+    ot_unique: bool = False,
+    geom_w: float | None = None,
 ) -> ad.AnnData:
     rng = np.random.default_rng(seed)
+    morph_rng = np.random.default_rng(int(seed) + 2_000_007)
     times = stage_times(spec.setting, cfg)
     rms_by_t = rms_map(stages, times)
     r_star = _r_target(spec, rms_by_t, cfg)
@@ -286,16 +311,36 @@ def generate(
     shape_mode = (shape_mode or cfg.get("shape", {}).get("mode") or "isotropic").lower()
     mix = cfg.get("shape", {}).get("mix_anchors", False) if mix_anchors is None else mix_anchors
     jitter = float(cfg["jitter_frac"] if jitter_frac is None else jitter_frac)
+    dens_keep = 1.0 if dens_keep is None else float(dens_keep)
+    if crop_to_rms and dens_keep < 1.0 - 1e-12:
+        raise ValueError("crop_to_rms and dens_keep cannot be combined")
+    if crop_to_rms and shape_mode == "tps":
+        raise ValueError("crop_to_rms cannot combine with TPS")
+    if crop_to_rms and (ot_xyz or "").lower() == "occ":
+        raise ValueError("crop_to_rms cannot combine with occupancy xyz")
+    r_geom = r_star if crop_rms is None else float(crop_rms)
+    if crop_rms is not None and not crop_to_rms:
+        raise ValueError("crop_rms requires crop_to_rms")
+    if crop_to_rms and r_geom <= 0:
+        raise ValueError(f"crop RMS must be positive, got {r_geom}")
 
     if method == "copy_last":
         src = stages[spec.src]
         out = copy_last(src, n=n, seed=seed)
-        return _finalize(out.X, out.obsm["spatial_3D"], panel, spec)
+        xyz = dens_keep_cloud(out.obsm["spatial_3D"], dens_keep, morph_rng)
+        return _finalize(out.X, xyz, panel, spec)
 
     if method == "scale_copy":
         src = stages[spec.src]
+        if crop_to_rms:
+            out = copy_last(src, n=n, seed=seed)
+            xyz = radius_crop_resample(out.obsm["spatial_3D"], r_geom, morph_rng)
+            return _finalize(out.X, xyz, panel, spec)
         out = scale_copy(src, n=n, r_target=r_star, seed=seed)
-        return _finalize(out.X, out.obsm["spatial_3D"], panel, spec)
+        xyz = dens_keep_cloud(out.obsm["spatial_3D"], dens_keep, morph_rng)
+        if dens_keep < 1.0 - 1e-12:
+            xyz = scale_cloud(xyz, r_star)
+        return _finalize(out.X, xyz, panel, spec)
 
     if method == "shift_scale":
         src = stages[spec.src]
@@ -307,7 +352,10 @@ def generate(
             delta, alpha = _delta_for(spec, stages, panel, cfg)
             out = scale_copy(src, n=n, r_target=r_star, seed=seed)
             out.X = add_delta(to_dense(out.X), delta, alpha=alpha, clip_min=clip)
-        return _finalize(out.X, out.obsm["spatial_3D"], panel, spec)
+        xyz = dens_keep_cloud(out.obsm["spatial_3D"], dens_keep, morph_rng)
+        if dens_keep < 1.0 - 1e-12:
+            xyz = scale_cloud(xyz, r_star)
+        return _finalize(out.X, xyz, panel, spec)
 
     # --- full: composition + cluster placement --------------------------------
     if composition is None:
@@ -330,18 +378,32 @@ def generate(
 
     if spec.mode == "interp":
         w = interp_weight(spec.t_left, spec.t_right, spec.t)
-        geom_stage = spec.left if nearest_side(spec.t, spec.t_left, spec.t_right) == "left" else spec.right
+        default_side = nearest_side(spec.t, spec.t_left, spec.t_right)
+        side = (geom_src or default_side).lower()
+        if side not in {"left", "right"}:
+            raise ValueError(f"geom_src must be left|right, got {side}")
+        geom_stage = spec.left if side == "left" else spec.right
+        expr_stage = spec.left if default_side == "left" else spec.right
+        mix_xyz = (mix_xyz or "paired").lower()
+        if mix_xyz not in {"paired", "left", "right"}:
+            raise ValueError(f"mix_xyz must be paired|left|right, got {mix_xyz}")
+        if mix_xyz == "left":
+            geom_stage = spec.left
+        elif mix_xyz == "right":
+            geom_stage = spec.right
         if mix:
             expr_w = {spec.left: 1.0 - w, spec.right: w}
         elif mix_expr:
             expr_w = {spec.left: 1.0 - w, spec.right: w}
         else:
-            expr_w = {geom_stage: 1.0}
+            # Geometry override must not switch the expression library.
+            expr_w = {expr_stage: 1.0}
         global_delta, delta_by_k = cluster_mean_delta(stages[spec.left], stages[spec.right], spec.setting)
         _, alpha = _delta_for(spec, stages, panel, cfg)
-        # Δ transports left → right. Cells already drawn from the right anchor
-        # must move backward: (w − 1) Δ.
-        if geom_stage == spec.right:
+        # Δ transports left → right. Flip only when expression was drawn from the
+        # right (not merely when the geometry template is the right cloud).
+        expr_only = [s for s, wt in expr_w.items() if wt > 0]
+        if len(expr_only) == 1 and expr_only[0] == spec.right:
             alpha = float(alpha) - 1.0
     else:
         geom_stage = spec.geom_src
@@ -367,8 +429,14 @@ def generate(
     if shape_mode == "anisotropic" and spec.t_left is not None and spec.right in stages:
         std_map = axis_map(stages, times)
         if spec.mode == "interp":
+            # geom_w overrides the axis-ratio weight only. The online TSR can
+            # imply a different effective weight than the clock (heart E8.5:
+            # RMS 255 sits at w~0.67 of the E8.25->E8.75 log path, not 0.5).
+            t_axis = spec.t
+            if geom_w is not None:
+                t_axis = spec.t_left + float(geom_w) * (spec.t_right - spec.t_left)
             axis_tgt = axis_interp(
-                spec.t_left, spec.t_right, spec.t,
+                spec.t_left, spec.t_right, t_axis,
                 std_map[spec.t_left], std_map[spec.t_right],
             )
         else:
@@ -383,33 +451,96 @@ def generate(
         needed.add(spec.right)
 
     stage_X, stage_xyz, stage_cl = {}, {}, {}
+    use_occ = (ot_xyz or "").lower() == "occ"
     for name in needed:
         if name not in stages:
             continue
+        C = spatial_xyz(stages[name])
         stage_X[name] = to_dense(stages[name].X)
         stage_cl[name] = np.asarray(labels_to_clusters(stages[name].obs["celltype"], spec.setting))
-        C = spatial_xyz(stages[name])
-        if shape_mode == "tps" and spec.mode == "interp" and spec.left in stages and spec.right in stages and name == spec.left:
+        if use_occ:
+            Z, r, _ = canonicalize(C)
+            stage_xyz[name] = (Z / max(r, 1e-8)).astype(np.float32)
+        elif shape_mode == "tps" and spec.mode == "interp" and spec.left in stages and spec.right in stages and name == spec.left:
             w = interp_weight(spec.t_left, spec.t_right, spec.t)
             tps_n = int(cfg.get("shape", {}).get("tps_n") or 800)
             stage_xyz[name] = ot_interpolate_clouds(
-                C, spatial_xyz(stages[spec.right]), w, r_star, n_pair=tps_n, rng=rng
+                C, spatial_xyz(stages[spec.right]), w, r_star, n_pair=tps_n, rng=morph_rng
             )
         else:
             stage_xyz[name] = transform_cloud(C, r_star, mode=geom_mode, axis_std_target=axis_tgt)
 
-    X, xyz, expr_clusters, expr_src = sample_paired_cells(
-        stage_X,
-        stage_xyz,
-        stage_cl,
-        alloc,
-        rng,
-        geom_stage=geom_stage,
-        expr_weights=expr_w,
-        progenitors=progs,
-        birth=birth,
-        sigma_birth=float(cfg["composition"]["sigma_birth"]),
-    )
+    mixed_expr = len([s for s, wt in expr_w.items() if wt > 0]) > 1
+    pair_xyz = mixed_expr and mix_xyz == "paired"
+    xyz_rng = np.random.default_rng(int(seed) + 1_000_003)
+    if ot_interp:
+        if spec.mode != "interp" or spec.left is None or spec.right is None:
+            raise ValueError("ot_interp only applies to interpolation targets")
+        w_ot = interp_weight(spec.t_left, spec.t_right, spec.t)
+        if ot_w is not None:
+            w_ot = float(ot_w)
+            if not (0.0 <= w_ot <= 1.0):
+                raise ValueError(f"ot_w must be in [0, 1], got {ot_w}")
+        n_pair = int(
+            ot_n_pair
+            or (cfg.get("shape") or {}).get("ot_n_pair")
+            or (cfg.get("shape") or {}).get("tps_n")
+            or 800
+        )
+        w_time = interp_weight(spec.t_left, spec.t_right, spec.t)
+        xyz_for_alloc = "left" if (ot_xyz or "").lower() == "occ" else ot_xyz
+        if (ot_xyz or "lerp").lower() in {"lerp", "occ"} and spec.left in stage_xyz and spec.right in stage_xyz:
+            stage_xyz[spec.right] = match_axis_flips(
+                stage_xyz[spec.left], stage_xyz[spec.right], morph_rng, n_pair=n_pair
+            )
+        X, xyz, expr_clusters = ot_interpolate_alloc(
+            stage_X,
+            stage_xyz,
+            stage_cl,
+            alloc,
+            spec.left,
+            spec.right,
+            w_ot,
+            rng,
+            pca=pca,
+            birth=birth,
+            progenitors=progs,
+            n_pair=n_pair,
+            sigma_birth=float(cfg["composition"]["sigma_birth"]),
+            xyz_mode=xyz_for_alloc,
+            x_mode=ot_x,
+            xyz_w=w_time,
+            xyz_rng=morph_rng,
+            unique_pick=bool(ot_unique),
+        )
+        if (ot_xyz or "").lower() == "occ":
+            occ_bins = int((cfg.get("shape") or {}).get("occ_bins") or 48)
+            occ_xyz = occupancy_interpolate_cloud(
+                stage_xyz[spec.left],
+                stage_xyz[spec.right],
+                w_time,
+                n=len(X),
+                rng=morph_rng,
+                n_bins=occ_bins,
+            )
+            xyz = ot_assign_xyz(xyz, occ_xyz)
+        expr_src = np.full(len(X), spec.left, dtype=object)
+        no_delta = True
+    else:
+        X, xyz, expr_clusters, expr_src = sample_paired_cells(
+            stage_X,
+            stage_xyz,
+            stage_cl,
+            alloc,
+            rng,
+            geom_stage=geom_stage,
+            expr_weights=expr_w,
+            progenitors=progs,
+            birth=birth,
+            sigma_birth=float(cfg["composition"]["sigma_birth"]),
+            pair_xyz_to_expr=pair_xyz,
+            xyz_rng=xyz_rng,
+        )
 
     if use_flow:
         t_start, dt_flow = _flow_clock(spec, times)
@@ -451,11 +582,25 @@ def generate(
         else:
             X = add_delta(X, global_delta, alpha=alpha, clip_min=clip)
 
+    if crop_to_rms:
+        tmpl_name = geom_stage
+        tmpl = spatial_xyz(stages[tmpl_name])
+        keep_n = len(radius_crop_indices(tmpl, r_geom))
+        print(f"crop_xyz {tmpl_name}: {len(tmpl)} -> {keep_n} (r_target={r_geom:.1f})")
+        xyz = crop_place_xyz(
+            xyz,
+            tmpl,
+            r_geom,
+            morph_rng,
+            mode=geom_mode,
+            axis_std_target=axis_tgt,
+        )
     if rescale_after:
-        xyz = scale_cloud(xyz, r_star)
+        xyz = scale_cloud(xyz, r_geom if crop_to_rms else r_star)
+    xyz = dens_keep_cloud(xyz, dens_keep, morph_rng)
     xyz = add_jitter(xyz, rng, jitter)
     if rescale_after:
-        xyz = scale_cloud(xyz, r_star)
+        xyz = scale_cloud(xyz, r_geom if crop_to_rms else r_star)
     X = np.clip(np.asarray(X, dtype=np.float32), clip, None)
     return _finalize(X, xyz, panel, spec)
 

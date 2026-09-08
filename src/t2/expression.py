@@ -257,6 +257,8 @@ def sample_paired_cells(
     progenitors: dict[str, str] | None = None,
     birth: frozenset[str] | None = None,
     sigma_birth: float = 0.0,
+    pair_xyz_to_expr: bool = False,
+    xyz_rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Draw (X, xyz) from the same source cell whenever the cluster exists on geom_stage.
 
@@ -264,12 +266,17 @@ def sample_paired_cells(
     from any stage that actually has the cluster. Never samples xyz from the
     whole-embryo blob.
 
+    If ``pair_xyz_to_expr`` is true, a cell drawn from stage S keeps S's
+    same-index xyz (both clouds must already share r_target / axes). Unpaired
+    fallback is only for birth / missing clusters that have no coordinates on S.
+
     Returns ``(X, xyz, cluster, expr_stage)``. ``expr_stage`` is the library
     each row was drawn from, so mixed-anchor interpolations can apply ``+wΔ``
     to left-anchor cells and ``+(w−1)Δ`` to right-anchor cells.
     """
     progenitors = progenitors or {}
     birth = birth or frozenset()
+    xyz_rng = xyz_rng or rng
     expr_stages = [s for s, w in expr_weights.items() if w > 0 and s in stage_X]
 
     def _xyz_pool(cluster: str) -> tuple[str, np.ndarray] | None:
@@ -327,10 +334,10 @@ def sample_paired_cells(
             take = rng.choice(idx, size=n_i, replace=len(idx) < n_i)
             x_chunks.append(stage_X[st][take])
             src_chunks.append(np.full(n_i, st, dtype=object))
-            if st == xyz_stage:
+            if st == xyz_stage or (pair_xyz_to_expr and st in stage_xyz):
                 y_chunks.append(stage_xyz[st][take])
             else:
-                take_xyz = rng.choice(xyz_idx, size=n_i, replace=len(xyz_idx) < n_i)
+                take_xyz = xyz_rng.choice(xyz_idx, size=n_i, replace=len(xyz_idx) < n_i)
                 y_chunks.append(stage_xyz[xyz_stage][take_xyz])
         x = np.concatenate(x_chunks, axis=0)
         xyz = np.concatenate(y_chunks, axis=0)

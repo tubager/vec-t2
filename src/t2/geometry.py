@@ -45,6 +45,50 @@ def anisotropic_scale(Z, axis_std_target, r_target: float) -> np.ndarray:
     return (Y * (r_target / max(r, 1e-8))).astype(np.float32)
 
 
+def kabsch_rotation(source, target) -> np.ndarray:
+    """det=+1 rotation mapping centered ``source`` rows toward centered ``target``."""
+    p = np.asarray(source, dtype=np.float64)
+    q = np.asarray(target, dtype=np.float64)
+    pc = p - p.mean(axis=0)
+    qc = q - q.mean(axis=0)
+    if len(p) < 3:
+        return np.eye(3, dtype=np.float64)
+    h = pc.T @ qc
+    u, _, vt = np.linalg.svd(h)
+    r = u @ vt
+    if np.linalg.det(r) < 0:
+        vt = vt.copy()
+        vt[-1] *= -1
+        r = u @ vt
+    return r
+
+
+def rigid_align(source, target) -> np.ndarray:
+    """Map ``source`` onto ``target``: det=+1 rotation, isotropic scale, translation.
+
+    Fits on all rows jointly (Kabsch). If fewer than 3 points or a cloud is
+    degenerate, returns the target centroid broadcast to ``source`` length.
+    """
+    p = np.asarray(source, dtype=np.float64)
+    q = np.asarray(target, dtype=np.float64)
+    if p.ndim != 2 or q.ndim != 2 or p.shape[1] != 3 or q.shape[1] != 3:
+        raise ValueError("rigid_align expects [n, 3] clouds")
+    if len(p) != len(q):
+        raise ValueError("rigid_align needs paired clouds of equal length")
+    if len(p) < 3:
+        return np.broadcast_to(q.mean(axis=0), p.shape).astype(np.float32)
+    pc = p - p.mean(axis=0)
+    qc = q - q.mean(axis=0)
+    rp = float(np.sqrt((pc**2).sum(axis=1).mean()))
+    rq = float(np.sqrt((qc**2).sum(axis=1).mean()))
+    if rp < 1e-8:
+        return np.broadcast_to(q.mean(axis=0), p.shape).astype(np.float32)
+    r = kabsch_rotation(pc, qc)
+    scale = rq / rp
+    aligned = (pc @ r) * scale + q.mean(axis=0)
+    return aligned.astype(np.float32)
+
+
 def transform_isotropic(C, r_target: float) -> np.ndarray:
     return scale_cloud(C, r_target)
 

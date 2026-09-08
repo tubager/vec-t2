@@ -3,6 +3,7 @@
 - 对应总计划：[model_training_plan.md](model_training_plan.md)
 - OT-CFM 本地评估（2026-09-03）：[t2_flow_eval.md](t2_flow_eval.md)
 - P2 验证榜提交（2026-09-05）：[t2_p2_val_2026-09-05.md](t2_p2_val_2026-09-05.md)
+- P2 冲前十计划（2026-09-07）：[t2_p2_plan_2026-09-07.md](t2_p2_plan_2026-09-07.md)
 - 官方任务页：[评分 Task 2](https://virtualembryo.ai/challenge/evaluation?section=scoring&task=2) · [数据](https://virtualembryo.ai/challenge/data) · [panel 索引](https://virtualembryo.ai/challenge/panels/index.json)
 - 本地评分：`pip install veckit`（当前 0.1.2）
 - 文档日期：2026-09-02
