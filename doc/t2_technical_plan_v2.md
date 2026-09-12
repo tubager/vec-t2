@@ -3,6 +3,7 @@
 - 取代：[t2_technical_plan.md](t2_technical_plan.md)（2026-09-02，从零跑通地板；**不要改那份**，当历史）
 - 提交链：[t2_p2_val_2026-09-05.md](t2_p2_val_2026-09-05.md)
 - 09-07 冲榜日记：[t2_p2_plan_2026-09-07.md](t2_p2_plan_2026-09-07.md)
+- 09-09 提交队列：[t2_p2_plan_2026-09-09.md](t2_p2_plan_2026-09-09.md)
 - 本地 flow 负对照：[t2_flow_eval.md](t2_flow_eval.md)
 - 总计划：[model_training_plan.md](model_training_plan.md)
 - 官方：[评分 Task 2](https://virtualembryo.ai/challenge/evaluation?section=scoring&task=2) · [数据](https://virtualembryo.ai/challenge/data) · [panel](https://virtualembryo.ai/challenge/panels/index.json)

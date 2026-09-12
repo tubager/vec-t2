@@ -2,7 +2,7 @@
 
 NeurIPS 2026 [Virtual Embryo Challenge](https://virtualembryo.ai/challenge) 代码。Task 1：由 E8.5 / E9.5 全转录组预测未来阶段的细胞表达分布。Task 2：3D MERFISH 的时空预测（表达 + `spatial_3D`），胚胎与心脏两个 setting 分开建模。
 
-详细设计见 [doc/t1_technical_plan.md](doc/t1_technical_plan.md)、[doc/t2_technical_plan_v2.md](doc/t2_technical_plan_v2.md)（当前；[v1](doc/t2_technical_plan.md) 为 09-02 历史稿），三项任务总计划见 [doc/model_training_plan.md](doc/model_training_plan.md)。T2 OT-CFM 本地评估见 [doc/t2_flow_eval.md](doc/t2_flow_eval.md)。P2 验证榜提交记录见 [doc/t2_p2_val_2026-09-05.md](doc/t2_p2_val_2026-09-05.md)。P2 冲榜日记见 [doc/t2_p2_plan_2026-09-07.md](doc/t2_p2_plan_2026-09-07.md)。
+详细设计见 [doc/t1_technical_plan.md](doc/t1_technical_plan.md)、[doc/t2_technical_plan_v2.md](doc/t2_technical_plan_v2.md)（当前；[v1](doc/t2_technical_plan.md) 为 09-02 历史稿），三项任务总计划见 [doc/model_training_plan.md](doc/model_training_plan.md)。T2 OT-CFM 本地评估见 [doc/t2_flow_eval.md](doc/t2_flow_eval.md)。P2 验证榜提交记录见 [doc/t2_p2_val_2026-09-05.md](doc/t2_p2_val_2026-09-05.md)。P2 冲榜日记见 [doc/t2_p2_plan_2026-09-07.md](doc/t2_p2_plan_2026-09-07.md)、[doc/t2_p2_plan_2026-09-09.md](doc/t2_p2_plan_2026-09-09.md)（当前提交队列）。
 
 所有命令都在**项目根目录**执行。原始 `.h5ad` 放在 `data/`。
 

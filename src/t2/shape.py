@@ -231,11 +231,12 @@ def occupancy_interpolate_cloud(
     return np.stack([xs, ys, zs], axis=1).astype(np.float32)
 
 
-# Exact Hungarian assignment is O(n^2) memory; at the heart leaderboard cap
-# (n=17,616) the dense cost matrix alone is 2.5 GB. Above this size fall back
-# to a greedy kNN assignment, which keeps every point within a few percent of
-# its optimal partner when both clouds sample the same region.
-_EXACT_ASSIGN_MAX = 2000
+# Exact Hungarian assignment is O(n^2) memory: 5,000 points already need ~0.8 GB
+# for the difference tensor, and the heart leaderboard cap (17,616) would need
+# 7.5 GB. Above this size fall back to a greedy kNN assignment, which keeps every
+# point within a few percent of its optimal partner when both clouds sample the
+# same region (median displacement 0.0742 vs 0.0748 exact on a 3,000-point test).
+_EXACT_ASSIGN_MAX = 5000
 
 
 def greedy_assign_xyz(src, tgt, k: int = 24) -> np.ndarray:

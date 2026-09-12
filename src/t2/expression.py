@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from pathlib import Path
 
@@ -25,8 +26,17 @@ from t2.io import mean_X, spatial_xyz, to_dense
 class CompositionT2:
     """Simplex interpolation on working clusters; freeze + FOV-zero on heart extrap."""
 
-    def __init__(self, setting: str, times: dict[str, float], eps: float = 1e-6):
+    def __init__(self, setting: str, times: dict[str, float], eps: float = 1e-6, extrap_trend: float = 0.0,
+                 comp_interp: str = "lin", geo_eps: float = 1e-4, geo_damp: float = 1.0):
         self.setting = setting
+        self.extrap_trend = float(extrap_trend)
+        self.comp_interp = str(comp_interp or "lin").lower()
+        self.geo_eps = float(geo_eps)
+        self.geo_damp = float(geo_damp)
+        if self.comp_interp not in {"lin", "geo", "hell", "blend"}:
+            raise ValueError(f"comp_interp must be lin|geo|hell|blend, got {comp_interp}")
+        if not (0.0 <= self.geo_damp <= 1.0):
+            raise ValueError(f"geo_damp must be in [0,1], got {geo_damp}")
         self.times = {k: float(v) for k, v in times.items()}
         self.eps = eps
         self.order = cluster_order(setting)
@@ -70,17 +80,71 @@ class CompositionT2:
                 w = (t - t_left) / (t_right - t_left)
                 pl = self.pi_by_t[t_left]
                 pr = self.pi_by_t[t_right]
-                pi = {k: (1.0 - w) * pl[k] + w * pr[k] for k in self.order}
+                pi = self._interp_pair(pl, pr, w)
 
         if self.setting == "heart" and t >= 9.5 - 1e-9:
             for k in fov_lost_clusters("heart"):
                 pi[k] = 0.0
             # Freeze at E9.5 mix (already the case when 9.5 is the last fitted time).
-            if 9.5 in self.pi_by_t and t > 9.5 + 1e-9:
-                pi = dict(self.pi_by_t[9.5])
+            ts_fit = sorted(x for x in self.pi_by_t if x <= 9.5 + 1e-9)
+            if ts_fit and t > 9.5 + 1e-9:
+                base = dict(self.pi_by_t[ts_fit[-1]])
+                if self.extrap_trend > 0.0 and len(ts_fit) >= 2:
+                    # Damped continuation of the last observed composition slope.
+                    # Freeze beat every trend estimator on the testable E8.75->E9.5
+                    # transition (L1 0.617 vs 0.686+), so this stays opt-in and damped.
+                    t0, t1 = ts_fit[-2], ts_fit[-1]
+                    p0, p1 = self.pi_by_t[t0], self.pi_by_t[t1]
+                    step = (t - t1) / max(t1 - t0, 1e-9)
+                    base = {
+                        k: max(0.0, p1[k] + self.extrap_trend * (p1[k] - p0[k]) * step)
+                        for k in self.order
+                    }
                 for k in fov_lost_clusters("heart"):
-                    pi[k] = 0.0
+                    base[k] = 0.0
+                pi = base
         return self._renorm(pi)
+
+    def _interp_pair(self, pl: dict[str, float], pr: dict[str, float], w: float) -> dict[str, float]:
+        """Interpolate two cluster-proportion vectors along the simplex.
+
+        ``lin``  arithmetic, the historical default.
+        ``geo``  log-linear (geometric): exact for a cluster whose count grows/decays exponentially,
+                 which is what proliferation-driven composition change is. Measured on the only
+                 heart window with a real truth in hand (E8.25+E9.5 -> E8.75) it beats ``lin`` on
+                 every expression metric at a matched pick weight (mmd_u -31%, variogram -23%,
+                 de_direction +0.065) -- see doc/t2_p2_val_2026-09-05.md sec.9.
+        ``hell`` Hellinger chord: keeps the simplex constraint but is not exponential.
+        ``blend`` damped geo: renormalize(lin**(1-geo_damp) * geo**geo_damp), i.e. geometric
+        interpolation between the lin and geo simplex paths. With geo_damp=0.5 it keeps
+        ~75-80% of geo's measured W2 gain at roughly half the composition perturbation --
+        a hedge in case the W2 window does not transfer fully to the board window.
+        """
+        mode = self.comp_interp
+        if mode == "lin":
+            return {k: (1.0 - w) * pl[k] + w * pr[k] for k in self.order}
+        if mode == "geo":
+            e = self.geo_eps
+            return {k: 0.0 if (pl[k] <= 0.0 and pr[k] <= 0.0) else
+                    math.exp((1.0 - w) * math.log(pl[k] + e) + w * math.log(pr[k] + e))
+                    for k in self.order}
+        if mode == "blend":
+            e = self.geo_eps
+            d = self.geo_damp
+            out: dict[str, float] = {}
+            for k in self.order:
+                if pl[k] <= 0.0 and pr[k] <= 0.0:
+                    out[k] = 0.0
+                    continue
+                lin = (1.0 - w) * pl[k] + w * pr[k]
+                geo = math.exp((1.0 - w) * math.log(pl[k] + e) + w * math.log(pr[k] + e))
+                out[k] = (max(lin, e) ** (1.0 - d)) * (geo ** d)
+            tot = sum(out.values())
+            if tot > 0:
+                out = {k: v / tot for k, v in out.items()}
+            return out
+        return {k: ((1.0 - w) * math.sqrt(max(pl[k], 0.0)) + w * math.sqrt(max(pr[k], 0.0))) ** 2
+                for k in self.order}
 
     @staticmethod
     def _renorm(pi: dict[str, float]) -> dict[str, float]:
@@ -102,6 +166,10 @@ class CompositionT2:
         return {
             "setting": self.setting,
             "times": self.times,
+            "extrap_trend": self.extrap_trend,
+            "comp_interp": self.comp_interp,
+            "geo_eps": self.geo_eps,
+            "geo_damp": self.geo_damp,
             "eps": self.eps,
             "order": list(self.order),
             "pi_by_t": {str(k): v for k, v in self.pi_by_t.items()},
@@ -117,7 +185,11 @@ class CompositionT2:
     @classmethod
     def load(cls, path: Path) -> "CompositionT2":
         payload = json.loads(Path(path).read_text())
-        obj = cls(payload["setting"], payload["times"], eps=payload.get("eps", 1e-6))
+        obj = cls(payload["setting"], payload["times"], eps=payload.get("eps", 1e-6),
+                extrap_trend=float(payload.get("extrap_trend", 0.0) or 0.0),
+                comp_interp=str(payload.get("comp_interp") or "lin"),
+                geo_eps=float(payload.get("geo_eps", 1e-4) or 1e-4),
+                geo_damp=float(payload.get("geo_damp", 1.0) if payload.get("geo_damp") is not None else 1.0))
         obj.pi_by_t = {float(k): v for k, v in payload["pi_by_t"].items()}
         obj.counts_by_t = {float(k): {kk: int(vv) for kk, vv in v.items()} for k, v in payload["counts_by_t"].items()}
         obj.stage_t = payload.get("stage_t", {})

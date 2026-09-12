@@ -75,9 +75,32 @@ def _lb(cfg: dict, key: str) -> dict:
     return cfg["leaderboards"][key]
 
 
-def target_spec(setting: str, t: float, cfg: dict | None = None) -> TargetSpec:
-    """Resolve an official or local-proxy target."""
+def target_spec(
+    setting: str,
+    t: float,
+    cfg: dict | None = None,
+    *,
+    w2: bool = False,
+) -> TargetSpec:
+    """Resolve an official or local-proxy target.
+
+    ``w2``: heart leave-out E8.75, interpolate from E8.25+E9.5. The default
+    ``--target 8.75`` growth diagnostic still uses E8.75 as the right anchor
+    (composition leak); do not use it as an honest expression gate.
+    """
     t = float(t)
+    if w2:
+        if setting != "heart" or abs(t - 8.75) > 1e-9:
+            raise ValueError("--w2 requires setting=heart t=8.75")
+        lb = _lb(cfg, "heart_val_interp")
+        return TargetSpec(
+            setting="heart", t=8.75, mode="interp", split=None,
+            panel_key="panel_val_interp", n_genes=lb["n_genes"],
+            n_min=lb["n_min"], n_max=lb["n_max"],
+            left="E8.25", right="E9.5", src="E8.25", geom_src="E8.25",
+            t_left=8.25, t_right=9.5, allowed_times=[8.25, 9.5],
+            proxy=True,
+        )
     if setting == "embryo":
         te = cfg["time"]["embryo"] if cfg else {}
         if abs(t - 7.5) < 1e-9:
@@ -217,28 +240,43 @@ def axis_map(stages: dict[str, ad.AnnData], times: dict[str, float]) -> dict[flo
     return out
 
 
-def _delta_for(spec: TargetSpec, stages: dict[str, ad.AnnData], panel: list[str], cfg: dict) -> tuple[np.ndarray, float]:
+def _delta_for(
+    spec: TargetSpec,
+    stages: dict[str, ad.AnnData],
+    panel: list[str],
+    cfg: dict,
+    alpha_override: float | None = None,
+) -> tuple[np.ndarray, float]:
+    """Expression residual Δ and its step size α.
+
+    Do **not** reuse ``growth.heart_extrap_alpha_*`` here — those scale RMS via
+    ``r_extrap``. Expression α for extrap lives under ``shift.extrap_delta_alpha``
+    (or CLI ``--delta-alpha``). α=1.0 on E10.5 previously crashed online to 42.5;
+    prefer 0.3–0.5 on top of a ``--no-delta`` base.
+    """
     if spec.mode == "interp":
         prev = stages[spec.left]
         nxt = stages[spec.right]
         w = interp_weight(spec.t_left, spec.t_right, spec.t)
         delta = mean_X(nxt) - mean_X(prev)
-        return delta, w
+        alpha = float(w) if alpha_override is None else float(alpha_override)
+        return delta, alpha
     # extrap
+    shift = cfg.get("shift") or {}
     if spec.proxy and spec.t == 9.5:
-        # Fair one-step: last observed MERFISH Δ (E8.75 − E8.25), α=1.
+        # Fair one-step: last observed MERFISH Δ (E8.75 − E8.25).
         delta = mean_X(stages["E8.75"]) - mean_X(stages["E8.25"])
-        return delta, 1.0
+        alpha = 1.0 if alpha_override is None else float(alpha_override)
+        return delta, alpha
     prev = stages.get("E8.75") or stages[spec.left]
     nxt = stages.get("E9.5") or stages[spec.src]
     delta = mean_X(nxt) - mean_X(prev)
-    if abs(spec.t - 10.5) < 1e-9:
-        alpha = 1.0
-    elif abs(spec.t - 12.5) < 1e-9:
-        alpha = 1.0  # P3 grid; do not guess a larger step
+    if alpha_override is not None:
+        alpha = float(alpha_override)
     else:
-        alpha = 1.0
-    w_t1 = float(cfg["shift"].get("t1_delta_weight") or 0.0)
+        cfg_alpha = shift.get("extrap_delta_alpha")
+        alpha = 1.0 if cfg_alpha is None else float(cfg_alpha)
+    w_t1 = float(shift.get("t1_delta_weight") or 0.0)
     if w_t1 > 0:
         t1_delta = project_t1_delta(
             panel,
@@ -301,6 +339,16 @@ def generate(
     ot_n_pair: int | None = None,
     ot_unique: bool = False,
     geom_w: float | None = None,
+    crop_src: float | None = None,
+    crop_keep: float | None = None,
+    over_alloc: float = 2.0,
+    delta_alpha: float | None = None,
+    tps_w: float | None = None,
+    slice_keep: float = 0.4,
+    slice_mode: str = "band",
+    slice_stratify: str = "none",
+    slice_bins: int = 8,
+    slice_fill_frac: float = 0.08,
 ) -> ad.AnnData:
     rng = np.random.default_rng(seed)
     morph_rng = np.random.default_rng(int(seed) + 2_000_007)
@@ -323,6 +371,18 @@ def generate(
         raise ValueError("crop_rms requires crop_to_rms")
     if crop_to_rms and r_geom <= 0:
         raise ValueError(f"crop RMS must be positive, got {r_geom}")
+    if crop_src is not None:
+        if crop_to_rms:
+            raise ValueError("crop_src and crop_to_rms are two versions of the same FOV crop")
+        if float(crop_src) <= 0:
+            raise ValueError(f"crop_src radius must be positive, got {crop_src}")
+    if crop_keep is not None:
+        if crop_to_rms or crop_src is not None:
+            raise ValueError("crop_keep excludes crop_to_rms and crop_src")
+        if float(crop_keep) <= 0:
+            raise ValueError(f"crop_keep radius must be positive, got {crop_keep}")
+        if float(over_alloc) < 1.0:
+            raise ValueError(f"over_alloc must be >= 1, got {over_alloc}")
 
     if method == "copy_last":
         src = stages[spec.src]
@@ -349,7 +409,7 @@ def generate(
             w = interp_weight(spec.t_left, spec.t_right, spec.t)
             out = shift_scale(src, prev, nxt, r_star, n=n, alpha=w, seed=seed, clip_min=clip)
         else:
-            delta, alpha = _delta_for(spec, stages, panel, cfg)
+            delta, alpha = _delta_for(spec, stages, panel, cfg, alpha_override=delta_alpha)
             out = scale_copy(src, n=n, r_target=r_star, seed=seed)
             out.X = add_delta(to_dense(out.X), delta, alpha=alpha, clip_min=clip)
         xyz = dens_keep_cloud(out.obsm["spatial_3D"], dens_keep, morph_rng)
@@ -359,16 +419,24 @@ def generate(
 
     # --- full: composition + cluster placement --------------------------------
     if composition is None:
-        composition = CompositionT2(spec.setting, cfg["time"][spec.setting], eps=float(cfg["composition"]["eps"]))
+        composition = CompositionT2(
+            spec.setting,
+            cfg["time"][spec.setting],
+            eps=float(cfg["composition"]["eps"]),
+            extrap_trend=float((cfg.get("composition") or {}).get("extrap_comp_trend") or 0.0),
+            comp_interp=str((cfg.get("composition") or {}).get("comp_interp") or "lin"),
+            geo_damp=float((cfg.get("composition") or {}).get("geo_damp") if (cfg.get("composition") or {}).get("geo_damp") is not None else 1.0),
+        )
         composition.fit(
             {name: stages[name].obs["celltype"] for name in stages},
             {name: times[name] for name in stages},
         )
 
-    alloc = composition.allocate(spec.t, n, rng, allowed_times=spec.allowed_times)
+    n_alloc = n if crop_keep is None else int(np.ceil(n * float(over_alloc)))
+    alloc = composition.allocate(spec.t, n_alloc, rng, allowed_times=spec.allowed_times)
     got = sum(alloc.values())
-    if got != n:
-        raise RuntimeError(f"allocation {got} != n {n}")
+    if got != n_alloc:
+        raise RuntimeError(f"allocation {got} != n_alloc {n_alloc}")
 
     mix_expr = bool((cfg.get("composition") or {}).get("mix_expr", False)) if mix_expr is None else bool(mix_expr)
     per_cluster = bool((cfg.get("shift") or {}).get("per_cluster", True))
@@ -399,7 +467,7 @@ def generate(
             # Geometry override must not switch the expression library.
             expr_w = {expr_stage: 1.0}
         global_delta, delta_by_k = cluster_mean_delta(stages[spec.left], stages[spec.right], spec.setting)
-        _, alpha = _delta_for(spec, stages, panel, cfg)
+        _, alpha = _delta_for(spec, stages, panel, cfg, alpha_override=delta_alpha)
         # Δ transports left → right. Flip only when expression was drawn from the
         # right (not merely when the geometry template is the right cloud).
         expr_only = [s for s, wt in expr_w.items() if wt > 0]
@@ -408,7 +476,7 @@ def generate(
     else:
         geom_stage = spec.geom_src
         expr_w = {spec.src: 1.0}
-        global_delta, alpha = _delta_for(spec, stages, panel, cfg)
+        global_delta, alpha = _delta_for(spec, stages, panel, cfg, alpha_override=delta_alpha)
         delta_by_k = None
         if per_cluster and spec.left in stages and spec.right in stages:
             global_delta, delta_by_k = cluster_mean_delta(stages[spec.left], stages[spec.right], spec.setting)
@@ -463,12 +531,35 @@ def generate(
             stage_xyz[name] = (Z / max(r, 1e-8)).astype(np.float32)
         elif shape_mode == "tps" and spec.mode == "interp" and spec.left in stages and spec.right in stages and name == spec.left:
             w = interp_weight(spec.t_left, spec.t_right, spec.t)
+            if tps_w is not None:
+                w = float(tps_w)
+                if not (0.0 <= w <= 1.0):
+                    raise ValueError(f"tps_w must be in [0, 1], got {w}")
             tps_n = int(cfg.get("shape", {}).get("tps_n") or 800)
             stage_xyz[name] = ot_interpolate_clouds(
                 C, spatial_xyz(stages[spec.right]), w, r_star, n_pair=tps_n, rng=morph_rng
             )
         else:
             stage_xyz[name] = transform_cloud(C, r_star, mode=geom_mode, axis_std_target=axis_tgt)
+
+    if crop_src is not None:
+        # FOV crop by SELECTION: drop the donor cloud's periphery before allocation, so
+        # every submitted cell keeps its own (X, xyz) pair at native spacing. The
+        # alternative (--crop-to-rms) transports all n cells onto the cropped core, which
+        # moves peripheral expression into the centre and costs neighborhood_mmd.
+        if shape_mode == "tps":
+            raise ValueError("crop_src cannot combine with TPS")
+        if (ot_xyz or "").lower() == "occ":
+            raise ValueError("crop_src cannot combine with occupancy xyz")
+        donor = spec.left if spec.left in stage_xyz else geom_stage
+        raw = spatial_xyz(stages[donor])
+        keep = radius_crop_indices(raw, float(crop_src))
+        if len(keep) < n:
+            raise ValueError(f"crop_src keeps {len(keep)} cells, fewer than n={n}")
+        stage_X[donor] = stage_X[donor][keep]
+        stage_cl[donor] = stage_cl[donor][keep]
+        stage_xyz[donor] = stage_xyz[donor][keep]
+        print(f"crop_src {donor}: {len(raw)} -> {len(keep)} (r={float(crop_src):.1f})")
 
     mixed_expr = len([s for s, wt in expr_w.items() if wt > 0]) > 1
     pair_xyz = mixed_expr and mix_xyz == "paired"
@@ -481,6 +572,10 @@ def generate(
             w_ot = float(ot_w)
             if not (0.0 <= w_ot <= 1.0):
                 raise ValueError(f"ot_w must be in [0, 1], got {ot_w}")
+        if use_flow:
+            # Flow transports left-anchor cells partway to the right. Mixing in
+            # right-anchor X would push those cells past the target.
+            w_ot = 0.0
         n_pair = int(
             ot_n_pair
             or (cfg.get("shape") or {}).get("ot_n_pair")
@@ -512,6 +607,11 @@ def generate(
             xyz_w=w_time,
             xyz_rng=morph_rng,
             unique_pick=bool(ot_unique),
+            slice_keep=float(slice_keep),
+            slice_mode=str(slice_mode),
+            slice_stratify=str(slice_stratify or "none"),
+            slice_bins=int(slice_bins),
+            slice_fill_frac=float(slice_fill_frac),
         )
         if (ot_xyz or "").lower() == "occ":
             occ_bins = int((cfg.get("shape") or {}).get("occ_bins") or 48)
@@ -601,6 +701,24 @@ def generate(
     xyz = add_jitter(xyz, rng, jitter)
     if rescale_after:
         xyz = scale_cloud(xyz, r_geom if crop_to_rms else r_star)
+    if crop_keep is not None:
+        # FOV crop by REJECTION on the allocated cloud: every kept cell retains its own
+        # (X, xyz) pair, so the neighbourhood coupling and the native cell spacing survive,
+        # and the surviving composition is the one the narrowed field of view actually has.
+        n_before = len(xyz)
+        keep = radius_crop_indices(xyz, float(crop_keep))
+        n_inside = len(keep)
+        if len(keep) < n:
+            raise ValueError(
+                f"crop_keep={float(crop_keep):.1f} kept {len(keep)} of {len(xyz)} allocated cells, "
+                f"fewer than n={n}; raise --over-alloc (now {float(over_alloc):.2f})"
+            )
+        if len(keep) > n:
+            keep = np.sort(rng.choice(keep, size=n, replace=False))
+        X = np.asarray(X)[keep]
+        xyz = np.asarray(xyz)[keep]
+        expr_clusters = np.asarray(expr_clusters, dtype=object)[keep]
+        print(f"crop_keep: allocated {n_before} -> inside r={float(crop_keep):.1f} {n_inside} -> submitted {len(keep)}")
     X = np.clip(np.asarray(X, dtype=np.float32), clip, None)
     return _finalize(X, xyz, panel, spec)
 

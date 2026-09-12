@@ -9,8 +9,17 @@ import torch
 import torch.nn as nn
 
 
-def hops_for(setting: str) -> list[tuple[str, str]]:
-    """Adjacent training hops. Embryo interpolates; heart has interp + one-step extrap."""
+def hops_for(
+    setting: str,
+    pairs: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """Adjacent training hops. Embryo interpolates; heart has interp + one-step extrap.
+
+    ``pairs`` overrides the default hop list (leave-out gates: embryo E6.75→E8.0,
+    heart W2 E8.25→E9.5).
+    """
+    if pairs:
+        return [(str(a), str(b)) for a, b in pairs]
     if setting == "embryo":
         return [("E6.75", "E7.25"), ("E7.25", "E8.0")]
     if setting == "heart":
@@ -63,12 +72,18 @@ class Velocity(nn.Module):
 
 
 def cfm_loss(model: Velocity, z0, z1, t0, dt, cid, z_noise: float = 0.0):
+    """OT-CFM in *velocity* units so Euler ``z += v·Δt`` is consistent across hop lengths.
+
+    The previous target was the raw displacement ``z1−z0`` while Euler still multiplied
+    by ``dt/steps``, so a 0.5-day hop only travelled halfway even when integrating the
+    full interval. New checkpoints are incompatible with that parameterization.
+    """
     tau = torch.rand(z0.size(0), 1, device=z0.device)
     if z_noise > 0:
         z0 = z0 + z_noise * torch.randn_like(z0)
         z1 = z1 + z_noise * torch.randn_like(z1)
     z_tau = (1 - tau) * z0 + tau * z1
-    u = z1 - z0
+    u = (z1 - z0) / dt.clamp_min(1e-6)
     t = t0 + tau * dt
     v = model(z_tau, t, dt, cid)
     return ((v - u) ** 2).mean()

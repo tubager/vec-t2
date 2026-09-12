@@ -42,11 +42,13 @@ shape:
   rescale_after_place: true  # 按簇抽样后把整云再缩到 r_target（修 TSR）
   allow_tps: false       # 本地各向异性已赢 SDD/ODS，P2 不上 TPS
   tps_n: 800             # OT 配对点数（仅 tps）
+  occ_bins: 24           # occ 体素密度插值格数；09-09 双代理 b24 ≥ b48（心脏 shape 72.7 vs 71.3）
 
 shift:
   clip_min: 0.0
   per_cluster: true      # full：每工作簇自己的均值差，缺一侧则回退全局 Δ
   t1_delta_weight: 0.0   # 心脏外推：T1 Δ 投影到 panel 的凸组合权重
+  extrap_delta_alpha: null  # 表达残差 α（与 growth.heart_extrap_alpha_* RMS 无关）；null=1.0；线上 α=1 曾砸到 42.5，G0 上叠时用 0.3–0.5
 
 composition:
   eps: 1.0e-6
