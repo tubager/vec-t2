@@ -349,6 +349,7 @@ def generate(
     slice_stratify: str = "none",
     slice_bins: int = 8,
     slice_fill_frac: float = 0.08,
+    slice_knn: int = 15,
 ) -> ad.AnnData:
     rng = np.random.default_rng(seed)
     morph_rng = np.random.default_rng(int(seed) + 2_000_007)
@@ -612,6 +613,7 @@ def generate(
             slice_stratify=str(slice_stratify or "none"),
             slice_bins=int(slice_bins),
             slice_fill_frac=float(slice_fill_frac),
+            slice_knn=int(slice_knn),
         )
         if (ot_xyz or "").lower() == "occ":
             occ_bins = int((cfg.get("shape") or {}).get("occ_bins") or 48)

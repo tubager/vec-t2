@@ -462,9 +462,9 @@ python scripts/14_score_local_t2.py --proxy heart_interp_gate \
 
 | 榜单 | skill | 上传这个文件 |
 |------|-------|----------------|
-| `T2:embryo:val_interp` | 65.12 | `outputs/t2/submit/T2_embryo_val_interp.h5ad` |
-| `T2:heart:val_interp` | 64.58 | `outputs/t2/submit/T2_heart_val_interp.h5ad` |
-| `T2:heart:val_extrap` | 54.15 | `outputs/t2/submit/T2_heart_val_extrap.h5ad` |
+| `T2:embryo:val_interp` | 69.67 | `outputs/t2/submit/T2_embryo_val_interp.h5ad` |
+| `T2:heart:val_interp` | 69.67 | `outputs/t2/submit/T2_heart_val_interp.h5ad` |
+| `T2:heart:val_extrap` | 57.57 | `outputs/t2/submit/T2_heart_val_extrap.h5ad` |
 
 P3（约 2026-10-20）验证答案放出后，用真值重训组成、β、α；每个 setting 的测试只留 2 个版本（稳健：scale+shift+按簇；激进：+TPS/flow 仅当验证集门控通过）。
 

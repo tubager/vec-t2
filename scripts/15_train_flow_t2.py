@@ -25,7 +25,10 @@ from t2.clusters import cluster_id_map, labels_to_clusters, shared_flow_clusters
 from t2.flow import (  # noqa: E402
     Velocity,
     cfm_loss,
+    cov_frobenius_loss,
+    euler_integrate_grad,
     flow_artifact_paths,
+    gene_cov_loss,
     get_device,
     hops_for,
     mmd_unbiased,
@@ -63,6 +66,8 @@ def _fit_setting(
     cfg: dict,
     epochs: int,
     mmd_w: float,
+    cov_w: float,
+    gene_cov_w: float,
     device: torch.device,
     seed: int,
     *,
@@ -70,6 +75,7 @@ def _fit_setting(
     exclude: list[str],
     residual: bool,
     out_dir: Path | None,
+    gene_cov_genes: int = 64,
 ) -> None:
     rng = np.random.default_rng(seed)
     dummy_t = 7.5 if setting == "embryo" else 8.5
@@ -166,8 +172,15 @@ def _fit_setting(
     print(
         f"  training on {device} for {epochs} epochs  "
         f"hops={[(h['left'], h['right']) for h in hops]}  "
-        f"steps/epoch={len(units)}  residual={residual}"
+        f"steps/epoch={len(units)}  residual={residual}  "
+        f"mmd_w={mmd_w:g} cov_w={cov_w:g} gene_cov_w={gene_cov_w:g}"
     )
+    components_t = mean_t = None
+    if gene_cov_w > 0:
+        components_t = torch.tensor(
+            np.asarray(pca.model.components_, dtype=np.float32), device=device
+        )
+        mean_t = torch.tensor(np.asarray(pca.model.mean_, dtype=np.float32), device=device)
     model.train()
     for epoch in range(1, epochs + 1):
         order = [units[i] for i in rng.permutation(len(units))]
@@ -182,10 +195,16 @@ def _fit_setting(
             dt_t = torch.full((n, 1), hop["dt"], device=device, dtype=z0_t.dtype)
             cid = torch.full((n,), ids[cluster], device=device, dtype=torch.long)
             loss = cfm_loss(model, z0_t, z1_t, t0_t, dt_t, cid, z_noise=z_noise)
-            if mmd_w > 0:
-                tau = torch.rand(n, 1, device=device)
-                z_tau = (1 - tau) * z0_t + tau * z1_t
-                loss = loss + mmd_w * mmd_unbiased(z_tau, z1_t)
+            if mmd_w > 0 or cov_w > 0 or gene_cov_w > 0:
+                z_hat = euler_integrate_grad(model, z0_t, t0_t, dt_t, cid, steps=4)
+                if mmd_w > 0:
+                    loss = loss + mmd_w * mmd_unbiased(z_hat, z1_t)
+                if cov_w > 0:
+                    loss = loss + cov_w * cov_frobenius_loss(z_hat, z1_t)
+                if gene_cov_w > 0:
+                    loss = loss + gene_cov_w * gene_cov_loss(
+                        z_hat, z1_t, components_t, mean_t, n_genes=gene_cov_genes
+                    )
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -230,6 +249,24 @@ def main() -> int:
     parser.add_argument("--setting", choices=["embryo", "heart", "both"], default="both")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--mmd-weight", type=float, default=None)
+    parser.add_argument(
+        "--cov-weight",
+        type=float,
+        default=None,
+        help="Frobenius cov-match on Euler endpoint vs right latents (variogram guard).",
+    )
+    parser.add_argument(
+        "--gene-cov-weight",
+        type=float,
+        default=None,
+        help="Frobenius cov-match after PCA decode (gene space; stronger variogram guard).",
+    )
+    parser.add_argument(
+        "--gene-cov-genes",
+        type=int,
+        default=64,
+        help="random gene subset size for --gene-cov-weight (full 498 is heavy).",
+    )
     parser.add_argument("--device", default=None)
     parser.add_argument(
         "--hop",
@@ -262,6 +299,12 @@ def main() -> int:
     fcfg = cfg.get("flow") or {}
     epochs = args.epochs if args.epochs is not None else int(fcfg.get("epochs") or 200)
     mmd_w = args.mmd_weight if args.mmd_weight is not None else float(fcfg.get("mmd_weight") or 0.0)
+    cov_w = args.cov_weight if args.cov_weight is not None else float(fcfg.get("cov_weight") or 0.0)
+    gene_cov_w = (
+        args.gene_cov_weight
+        if args.gene_cov_weight is not None
+        else float(fcfg.get("gene_cov_weight") or 0.0)
+    )
     device = torch.device(args.device) if args.device else get_device()
     hop_pairs = _parse_hops(args.hop)
     out_dir = Path(args.out_dir) if args.out_dir else None
@@ -276,12 +319,15 @@ def main() -> int:
             cfg,
             epochs=epochs,
             mmd_w=mmd_w,
+            cov_w=cov_w,
+            gene_cov_w=gene_cov_w,
             device=device,
             seed=seed,
             hop_pairs=hop_pairs,
             exclude=list(args.exclude),
             residual=bool(args.residual),
             out_dir=out_dir,
+            gene_cov_genes=int(args.gene_cov_genes),
         )
     return 0
 

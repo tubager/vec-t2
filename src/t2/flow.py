@@ -89,6 +89,44 @@ def cfm_loss(model: Velocity, z0, z1, t0, dt, cid, z_noise: float = 0.0):
     return ((v - u) ** 2).mean()
 
 
+def cov_frobenius_loss(z_pred: torch.Tensor, z_tgt: torch.Tensor) -> torch.Tensor:
+    """Match second moments so CFM does not smear gene covariances (variogram killer)."""
+    if z_pred.size(0) < 2:
+        return z_pred.new_zeros(())
+    p = z_pred - z_pred.mean(dim=0, keepdim=True)
+    t = z_tgt - z_tgt.mean(dim=0, keepdim=True)
+    denom = float(max(z_pred.size(0) - 1, 1))
+    cp = (p.T @ p) / denom
+    ct = (t.T @ t) / denom
+    return ((cp - ct) ** 2).mean()
+
+
+def torch_pca_decode(z: torch.Tensor, components: torch.Tensor, mean: torch.Tensor) -> torch.Tensor:
+    """Differentiable sklearn IncrementalPCA inverse: x = z @ components_ + mean_."""
+    return z @ components + mean
+
+
+def gene_cov_loss(
+    z_pred: torch.Tensor,
+    z_tgt: torch.Tensor,
+    components: torch.Tensor,
+    mean: torch.Tensor,
+    n_genes: int = 64,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Second-moment match in gene space after decode (latent cov does not save variogram)."""
+    if z_pred.size(0) < 2:
+        return z_pred.new_zeros(())
+    x_p = torch_pca_decode(z_pred, components, mean)
+    x_t = torch_pca_decode(z_tgt, components, mean)
+    g = x_p.size(1)
+    k = min(int(n_genes), g)
+    if k < g:
+        idx = torch.randperm(g, device=z_pred.device, generator=generator)[:k]
+        x_p = x_p[:, idx]
+        x_t = x_t[:, idx]
+    return cov_frobenius_loss(x_p, x_t)
+
 @torch.no_grad()
 def euler_integrate(
     model: Velocity,
@@ -98,6 +136,23 @@ def euler_integrate(
     cid: torch.Tensor,
     steps: int = 10,
 ) -> torch.Tensor:
+    z = z.clone()
+    h = dt / steps
+    for i in range(steps):
+        t_i = t + i * h
+        z = z + model(z, t_i, dt, cid) * h
+    return z
+
+
+def euler_integrate_grad(
+    model: Velocity,
+    z: torch.Tensor,
+    t: torch.Tensor,
+    dt: torch.Tensor,
+    cid: torch.Tensor,
+    steps: int = 4,
+) -> torch.Tensor:
+    """Differentiable Euler (for cov / MMD regularizers during training)."""
     z = z.clone()
     h = dt / steps
     for i in range(steps):
@@ -166,8 +221,10 @@ def mmd_unbiased(
         kxx = _rbf(x, x, gamma)
         kyy = _rbf(y, y, gamma)
         kxy = _rbf(x, y, gamma)
-        mmd = kxx.fill_diagonal_(0).sum() / (n * (n - 1))
-        mmd = mmd + kyy.fill_diagonal_(0).sum() / (m * (m - 1))
+        kxx = kxx.clone().fill_diagonal_(0)
+        kyy = kyy.clone().fill_diagonal_(0)
+        mmd = kxx.sum() / (n * (n - 1))
+        mmd = mmd + kyy.sum() / (m * (m - 1))
         mmd = mmd - 2.0 * kxy.mean()
         acc = acc + mmd
     return acc / len(gammas)

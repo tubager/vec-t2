@@ -74,10 +74,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--ot-x",
-        choices=["lerp", "pick", "slice"],
+        choices=["lerp", "pick", "slice", "gauss", "local_gauss", "local_pick", "local_pool"],
         default="lerp",
-        help="ot-interp: lerp paired genes, pick a real left/right cell (Bernoulli w), "
-        "or slice (pick only from cells near clock progress within each type)",
+        help="ot-interp: lerp / pick / slice / gauss / local_gauss / local_pick / local_pool",
     )
     parser.add_argument(
         "--slice-keep",
@@ -93,22 +92,29 @@ def main() -> int:
     )
     parser.add_argument(
         "--slice-stratify",
-        choices=["none", "spatial", "fill"],
+        choices=["none", "spatial", "fill", "knn"],
         default="none",
         help="ot-x slice: none = global expression band; spatial = band inside voxels; "
+        "knn = band on local kNN progress ranks; "
         "fill = global band plus one best-progress cell per missed occupied voxel",
     )
     parser.add_argument(
         "--slice-bins",
         type=int,
         default=8,
-        help="ot-x slice --slice-stratify spatial|fill: bins per canonical axis (default 8)",
+        help="ot-x slice --slice-stratify spatial|fill|knn: bins per canonical axis (default 8)",
     )
     parser.add_argument(
         "--slice-fill-frac",
         type=float,
         default=0.08,
         help="ot-x slice --slice-stratify fill: max extra cells per cluster as a fraction (default 0.08)",
+    )
+    parser.add_argument(
+        "--slice-knn",
+        type=int,
+        default=15,
+        help="ot-x slice|local_gauss|local_pick: neighborhood size (default 15)",
     )
     parser.add_argument(
         "--ot-xyz",
@@ -291,10 +297,26 @@ def main() -> int:
             raise SystemExit("--ot-x slice requires --ot-interp")
         if not (0.0 < float(args.slice_keep) <= 1.0):
             raise SystemExit(f"--slice-keep must be in (0, 1], got {args.slice_keep}")
+        if args.slice_stratify == "knn" and int(args.slice_knn) < 2:
+            raise SystemExit(f"--slice-knn must be >= 2, got {args.slice_knn}")
         if args.slice_stratify != "none" and int(args.slice_bins) < 2:
             raise SystemExit(f"--slice-bins must be >= 2, got {args.slice_bins}")
+    elif args.ot_x in ("local_gauss", "local_pick", "local_pool"):
+        if int(args.slice_knn) < 2:
+            raise SystemExit(f"--slice-knn must be >= 2 for --ot-x {args.ot_x}, got {args.slice_knn}")
+        if args.slice_stratify != "none":
+            if not (0.0 < float(args.slice_keep) <= 1.0):
+                raise SystemExit(f"--slice-keep must be in (0, 1], got {args.slice_keep}")
+            if args.slice_stratify == "knn" and int(args.slice_knn) < 2:
+                raise SystemExit(f"--slice-knn must be >= 2, got {args.slice_knn}")
+            if int(args.slice_bins) < 2:
+                raise SystemExit(f"--slice-bins must be >= 2, got {args.slice_bins}")
     elif args.slice_stratify != "none":
-        raise SystemExit("--slice-stratify only applies with --ot-x slice")
+        raise SystemExit("--slice-stratify only applies with --ot-x slice|local_pick|local_pool|local_gauss")
+    if args.ot_xyz == "own" and args.ot_x not in (
+        "pick", "slice", "local_pick", "local_pool",
+    ):
+        raise SystemExit("--ot-xyz own requires --ot-x pick|slice|local_pick|local_pool")
     if args.crop_to_rms and args.dens_keep is not None:
         raise SystemExit("--crop-to-rms and --dens-keep cannot be combined")
     if args.crop_to_rms and str(shape_mode).lower() == "tps":
@@ -384,6 +406,7 @@ def main() -> int:
         slice_stratify=str(args.slice_stratify),
         slice_bins=int(args.slice_bins),
         slice_fill_frac=float(args.slice_fill_frac),
+        slice_knn=int(args.slice_knn),
     )
 
     tag = args.method
@@ -399,6 +422,16 @@ def main() -> int:
                     tag = f"{tag}_{args.slice_mode}k{args.slice_keep:g}"
                     if args.slice_stratify != "none":
                         tag = f"{tag}_{args.slice_stratify}{args.slice_bins}"
+                        if args.slice_stratify == "fill":
+                            tag = f"{tag}f{args.slice_fill_frac:g}"
+                        if args.slice_stratify == "knn":
+                            tag = f"{tag}k{args.slice_knn}"
+                elif args.ot_x in ("local_gauss", "local_pick", "local_pool"):
+                    tag = f"{tag}_k{args.slice_knn}"
+                    if args.slice_stratify != "none":
+                        tag = f"{tag}_{args.slice_mode}k{args.slice_keep:g}_{args.slice_stratify}{args.slice_bins}"
+                        if args.slice_stratify == "knn":
+                            tag = f"{tag}k{args.slice_knn}"
                         if args.slice_stratify == "fill":
                             tag = f"{tag}f{args.slice_fill_frac:g}"
             if args.ot_xyz != "lerp":

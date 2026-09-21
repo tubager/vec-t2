@@ -138,11 +138,30 @@ def _apportion(weights: np.ndarray, total: int) -> np.ndarray:
     return out
 
 
-def _spatial_stratified_pairs(
+def _local_progress_ranks(xyz: np.ndarray, scores: np.ndarray, k: int = 15) -> np.ndarray:
+    """Empirical CDF of each cell's progress among its spatial kNN (incl. self)."""
+    xyz = np.asarray(xyz, dtype=np.float64)
+    scores = np.asarray(scores, dtype=np.float64)
+    n = len(scores)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    kk = int(max(1, min(int(k), n)))
+    _, idx = cKDTree(xyz).query(xyz, k=kk)
+    idx = np.asarray(idx, dtype=np.int64)
+    if kk == 1:
+        idx = idx.reshape(n, 1)
+    ranks = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        local = scores[idx[i]]
+        ranks[i] = float(np.mean(local <= scores[i]))
+    return ranks
+
+
+def _binned_eligible_pairs(
     i0: np.ndarray,
     i1: np.ndarray,
-    s0: np.ndarray,
-    s1: np.ndarray,
+    score0: np.ndarray,
+    score1: np.ndarray,
     xyz0: np.ndarray,
     xyz1: np.ndarray,
     expr0: np.ndarray,
@@ -154,11 +173,7 @@ def _spatial_stratified_pairs(
     rng: np.random.Generator,
     n_grid: int = 8,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Expression-band inside spatial bins; pair quota follows full left occupancy.
-
-    Returns global stage indices ``(p0, p1)`` already Hungarian-paired, or
-    ``None`` to fall back to a global slice.
-    """
+    """Band on ``score*`` inside spatial bins; pair quota follows full left occupancy."""
     if len(i0) < 2 or len(i1) < 2:
         return None
     bins0 = _spatial_bin_ids(xyz0, n_grid=n_grid)
@@ -171,14 +186,14 @@ def _spatial_stratified_pairs(
     e1_by: dict[int, np.ndarray] = {}
     for b, _ in occ_map.items():
         loc0 = np.flatnonzero(bins0 == b)
-        e0_by[b] = loc0[_slice_eligible(s0[loc0], keep, target=target, side="left", mode=mode)]
+        e0_by[b] = loc0[_slice_eligible(score0[loc0], keep, target=target, side="left", mode=mode)]
         loc1 = np.flatnonzero(bins1 == b)
         if len(loc1) == 0:
             e1_by[b] = np.array([], dtype=np.int64)
         else:
-            e1_by[b] = loc1[_slice_eligible(s1[loc1], keep, target=target, side="right", mode=mode)]
+            e1_by[b] = loc1[_slice_eligible(score1[loc1], keep, target=target, side="right", mode=mode)]
 
-    e1_global = _slice_eligible(s1, keep, target=target, side="right", mode=mode)
+    e1_global = _slice_eligible(score1, keep, target=target, side="right", mode=mode)
     valid = [b for b in occ_map if len(e0_by[b]) > 0]
     if not valid:
         return None
@@ -227,6 +242,209 @@ def _spatial_stratified_pairs(
     return np.concatenate(p0_parts), np.concatenate(p1_parts)
 
 
+def _spatial_stratified_pairs(
+    i0: np.ndarray,
+    i1: np.ndarray,
+    s0: np.ndarray,
+    s1: np.ndarray,
+    xyz0: np.ndarray,
+    xyz1: np.ndarray,
+    expr0: np.ndarray,
+    expr1: np.ndarray,
+    keep: float,
+    target: float,
+    mode: str,
+    n_pair: int,
+    rng: np.random.Generator,
+    n_grid: int = 8,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Expression-band inside spatial bins; pair quota follows full left occupancy."""
+    return _binned_eligible_pairs(
+        i0, i1, s0, s1, xyz0, xyz1, expr0, expr1,
+        keep, target, mode, n_pair, rng, n_grid=n_grid,
+    )
+
+
+def _knn_stratified_pairs(
+    i0: np.ndarray,
+    i1: np.ndarray,
+    s0: np.ndarray,
+    s1: np.ndarray,
+    xyz0: np.ndarray,
+    xyz1: np.ndarray,
+    expr0: np.ndarray,
+    expr1: np.ndarray,
+    keep: float,
+    target: float,
+    mode: str,
+    n_pair: int,
+    rng: np.random.Generator,
+    n_grid: int = 8,
+    knn: int = 15,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Band on *local* progress ranks (kNN CDF); occupancy quota still spatial bins.
+
+    A periphery cell that is mid-stage for its neighborhood stays eligible even if
+    its global progress is early — the opposite failure mode of a global band.
+    """
+    r0 = _local_progress_ranks(xyz0, s0, k=knn)
+    r1 = _local_progress_ranks(xyz1, s1, k=knn)
+    return _binned_eligible_pairs(
+        i0, i1, r0, r1, xyz0, xyz1, expr0, expr1,
+        keep, target, mode, n_pair, rng, n_grid=n_grid,
+    )
+
+
+def _psd_cov(cov: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    cov = 0.5 * (cov + cov.T)
+    eig, vec = np.linalg.eigh(cov)
+    return (vec * np.clip(eig, eps, None)) @ vec.T
+
+
+def _gaussian_interp_rows(
+    X0: np.ndarray,
+    X1: np.ndarray,
+    w: float,
+    count: int,
+    rng: np.random.Generator,
+    pca,
+    clip_min: float = 0.0,
+) -> np.ndarray:
+    """Sample mid-stage rows from interpolated PCA Gaussians (cov preserved by construction)."""
+    if pca is None:
+        raise ValueError("x_mode=gauss requires panel PCA")
+    z0 = np.asarray(pca.encode(X0), dtype=np.float64)
+    z1 = np.asarray(pca.encode(X1), dtype=np.float64)
+    d = z0.shape[1]
+    mu = (1.0 - w) * z0.mean(axis=0) + w * z1.mean(axis=0)
+    if len(z0) < 2 or len(z1) < 2:
+        cov = np.eye(d, dtype=np.float64) * 1e-3
+    else:
+        c0 = np.cov(z0.T) + 1e-4 * np.eye(d)
+        c1 = np.cov(z1.T) + 1e-4 * np.eye(d)
+        cov = _psd_cov((1.0 - w) * c0 + w * c1)
+    z = rng.multivariate_normal(mu, cov, size=int(count)).astype(np.float32)
+    return np.asarray(pca.decode(z, clip_min=clip_min), dtype=np.float32)
+
+
+def _local_gaussian_rows(
+    query_xyz: np.ndarray,
+    xyz0: np.ndarray,
+    X0: np.ndarray,
+    xyz1: np.ndarray,
+    X1: np.ndarray,
+    w: float,
+    rng: np.random.Generator,
+    pca,
+    knn: int = 15,
+    clip_min: float = 0.0,
+) -> np.ndarray:
+    """Per-placement PCA Gaussians from spatial kNN on each anchor (spatial-conditional).
+
+    Placement coordinates keep full-span occupancy; expression is sampled from the
+    local left/right neighborhoods around each point, so (X, xyz) coupling is native.
+    """
+    if pca is None:
+        raise ValueError("x_mode=local_gauss requires panel PCA")
+    q = np.asarray(query_xyz, dtype=np.float64)
+    xyz0 = np.asarray(xyz0, dtype=np.float64)
+    xyz1 = np.asarray(xyz1, dtype=np.float64)
+    z0 = np.asarray(pca.encode(X0), dtype=np.float64)
+    z1 = np.asarray(pca.encode(X1), dtype=np.float64)
+    d = int(z0.shape[1])
+    n = len(q)
+    k0 = int(max(1, min(int(knn), len(xyz0))))
+    k1 = int(max(1, min(int(knn), len(xyz1))))
+    _, i0 = cKDTree(xyz0).query(q, k=k0)
+    _, i1 = cKDTree(xyz1).query(q, k=k1)
+    i0 = np.asarray(i0, dtype=np.int64).reshape(n, k0)
+    i1 = np.asarray(i1, dtype=np.int64).reshape(n, k1)
+    eye = np.eye(d, dtype=np.float64)
+    zs = np.empty((n, d), dtype=np.float64)
+    for j in range(n):
+        loc0 = z0[i0[j]]
+        loc1 = z1[i1[j]]
+        mu = (1.0 - w) * loc0.mean(axis=0) + w * loc1.mean(axis=0)
+        if loc0.shape[0] >= 2 and loc1.shape[0] >= 2:
+            c0 = np.cov(loc0.T) + 1e-4 * eye
+            c1 = np.cov(loc1.T) + 1e-4 * eye
+            cov = _psd_cov((1.0 - w) * c0 + w * c1)
+        else:
+            cov = eye * 1e-3
+        zs[j] = rng.multivariate_normal(mu, cov)
+    return np.asarray(pca.decode(zs.astype(np.float32), clip_min=clip_min), dtype=np.float32)
+
+
+def _local_pick_rows(
+    query_xyz: np.ndarray,
+    xyz0: np.ndarray,
+    X0: np.ndarray,
+    s0: np.ndarray,
+    xyz1: np.ndarray,
+    X1: np.ndarray,
+    s1: np.ndarray,
+    w: float,
+    rng: np.random.Generator,
+    knn: int = 15,
+    pool: bool = False,
+    *,
+    return_xyz: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """Per-placement: pick a real cell from spatial kNN whose progress is closest to ``w``.
+
+    Default: Bernoulli(w) chooses left vs right neighborhood first, then argmin |score − w|.
+    ``pool=True``: search both neighborhoods jointly (no Bernoulli), still a real cell.
+    Preserves true coexpression. With ``return_xyz=False`` (legacy), occupancy stays on
+    the query cloud. With ``return_xyz=True``, also returns the donor cell's own xyz
+    (native ``(X, xyz)`` birth for ``--ot-xyz own``).
+    """
+    q = np.asarray(query_xyz, dtype=np.float64)
+    xyz0 = np.asarray(xyz0, dtype=np.float64)
+    xyz1 = np.asarray(xyz1, dtype=np.float64)
+    s0 = np.asarray(s0, dtype=np.float64)
+    s1 = np.asarray(s1, dtype=np.float64)
+    n = len(q)
+    k0 = int(max(1, min(int(knn), len(xyz0))))
+    k1 = int(max(1, min(int(knn), len(xyz1))))
+    _, i0 = cKDTree(xyz0).query(q, k=k0)
+    _, i1 = cKDTree(xyz1).query(q, k=k1)
+    i0 = np.asarray(i0, dtype=np.int64).reshape(n, k0)
+    i1 = np.asarray(i1, dtype=np.int64).reshape(n, k1)
+    out = np.empty((n, X0.shape[1]), dtype=np.float32)
+    out_xyz = np.empty((n, xyz0.shape[1]), dtype=np.float32) if return_xyz else None
+    if pool:
+        for j in range(n):
+            loc0, loc1 = i0[j], i1[j]
+            d0 = np.abs(s0[loc0] - w)
+            d1 = np.abs(s1[loc1] - w)
+            if float(d0.min()) <= float(d1.min()):
+                best = int(loc0[int(np.argmin(d0))])
+                out[j] = X0[best]
+                if out_xyz is not None:
+                    out_xyz[j] = xyz0[best]
+            else:
+                best = int(loc1[int(np.argmin(d1))])
+                out[j] = X1[best]
+                if out_xyz is not None:
+                    out_xyz[j] = xyz1[best]
+        return (out, out_xyz) if return_xyz else out
+    take_right = rng.random(n) < np.clip(w, 0.0, 1.0)
+    for j in range(n):
+        if take_right[j]:
+            loc = i1[j]
+            best = int(loc[np.argmin(np.abs(s1[loc] - w))])
+            out[j] = X1[best]
+            if out_xyz is not None:
+                out_xyz[j] = xyz1[best]
+        else:
+            loc = i0[j]
+            best = int(loc[np.argmin(np.abs(s0[loc] - w))])
+            out[j] = X0[best]
+            if out_xyz is not None:
+                out_xyz[j] = xyz0[best]
+    return (out, out_xyz) if return_xyz else out
+
+
 def draw_pair_indices(
     m: int,
     count: int,
@@ -273,23 +491,27 @@ def ot_interpolate_alloc(
     slice_stratify: str = "none",
     slice_bins: int = 8,
     slice_fill_frac: float = 0.08,
+    slice_knn: int = 15,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-cluster Hungarian pairing, then place cells. No global Δ.
 
     ``x_mode``:
       - ``lerp``: gene-wise ``(1-w) X_L + w X_R`` (smears covariance).
       - ``pick``: keep a real cell, Bernoulli(w) left vs right.
-      - ``slice``: same as pick, but only from cells whose within-type progress
-        along (μ_R−μ_L) is near the clock weight (``band``) or from the late
-        left tail + early right tail (``tail``). Real rows only.
-        ``slice_stratify='spatial'`` applies that band *inside* spatial voxels
-        of the left cloud, allocating templates by full-cloud occupancy so a
-        global expression slice cannot empty the periphery.
-        ``slice_stratify='fill'`` keeps the global band, then adds one
-        best-progress cell from each occupied voxel the band missed.
+      - ``slice``: same as pick, but only from cells near clock progress
+        (``band`` / ``tail``); optional ``slice_stratify`` spatial|knn|fill.
+      - ``gauss``: cluster-wide PCA Gaussian interp at clock ``w``.
+      - ``local_gauss``: per-placement PCA Gaussians from spatial kNN on each
+        anchor (``slice_knn``); occupancy stays on OT placement coordinates.
+      - ``local_pick``: per-placement real cell from spatial kNN with progress
+        closest to ``w`` (Bernoulli left/right); true coexpression, native coupling.
 
     ``xyz_mode`` uses the matched partner: ``lerp`` / ``left`` / ``right`` / ``morph`` / ``own``.
-    ``own``: each picked cell keeps its own coordinate (native pairing).
+    ``own``: each picked cell keeps its own coordinate (native pairing). Works with
+    ``pick`` / ``slice`` / ``local_pick`` / ``local_pool``. For local_* this is the
+    donor neighborhood cell's xyz (true native birth), not the OT query point.
+    ``local_pick`` / ``local_pool`` also honor ``slice_stratify`` spatial|knn|fill so
+    pairing quotas follow the 04 occupancy skeleton.
     ``morph``: per-cluster spatial OT displacement on the left cloud, then
     place at the matched left cell's morphed coordinate.
     ``xyz_w`` is the lerp/morph weight for coordinates (default: same as ``w``).
@@ -332,7 +554,13 @@ def ot_interpolate_alloc(
 
         if len(i0) and len(i1):
             x_mode_n = (x_mode or "lerp").lower()
-            if x_mode_n == "slice":
+            strat = (slice_stratify or "none").lower()
+            # Spatial/knn/fill quotas (04 ODS skeleton) also apply to local_pick birth.
+            use_slice_pool = x_mode_n == "slice" or (
+                x_mode_n in ("local_pick", "local_pool", "local_gauss")
+                and strat in ("spatial", "knn", "fill")
+            )
+            if use_slice_pool:
                 keep = float(slice_keep)
                 if not (0.0 < keep <= 1.0):
                     raise ValueError(f"slice_keep must be in (0, 1], got {keep}")
@@ -344,18 +572,26 @@ def ot_interpolate_alloc(
                     s1 = np.ones(len(i1))
                 else:
                     s0, s1, _ = prog
-                strat = (slice_stratify or "none").lower()
                 paired = None
-                if strat == "spatial":
+                if strat in ("spatial", "knn"):
                     n_grid = int(slice_bins)
                     if n_grid < 2:
                         raise ValueError(f"slice_bins must be >= 2, got {n_grid}")
-                    paired = _spatial_stratified_pairs(
-                        i0, i1, s0, s1,
-                        stage_xyz[left][i0], stage_xyz[right][i1],
-                        z0_all, z1_all,
-                        keep, w, slice_mode, n_pair, rng, n_grid=n_grid,
-                    )
+                    if strat == "knn":
+                        paired = _knn_stratified_pairs(
+                            i0, i1, s0, s1,
+                            stage_xyz[left][i0], stage_xyz[right][i1],
+                            z0_all, z1_all,
+                            keep, w, slice_mode, n_pair, rng,
+                            n_grid=n_grid, knn=int(slice_knn),
+                        )
+                    else:
+                        paired = _spatial_stratified_pairs(
+                            i0, i1, s0, s1,
+                            stage_xyz[left][i0], stage_xyz[right][i1],
+                            z0_all, z1_all,
+                            keep, w, slice_mode, n_pair, rng, n_grid=n_grid,
+                        )
                 if paired is not None:
                     p0, p1 = paired
                     m = len(p0)
@@ -393,7 +629,43 @@ def ot_interpolate_alloc(
                 ri, ci = _hungarian(encode(stage_X[left][s0p]), encode(stage_X[right][s1p]))
                 p0, p1 = s0p[ri], s1p[ci]
             pick = draw_pair_indices(m, count, rng, unique_pick)
-            if x_mode_n == "pick" or x_mode_n == "slice":
+            take_right = None
+            donor_xyz = None
+            if x_mode_n == "local_gauss":
+                query = stage_xyz[left][p0[pick]]
+                x = _local_gaussian_rows(
+                    query,
+                    stage_xyz[left][i0], stage_X[left][i0],
+                    stage_xyz[right][i1], stage_X[right][i1],
+                    w, rng, pca, knn=int(slice_knn), clip_min=0.0,
+                )
+            elif x_mode_n in ("local_pick", "local_pool"):
+                z0_all = encode(stage_X[left][i0])
+                z1_all = encode(stage_X[right][i1])
+                prog = _progress_axis(z0_all, z1_all)
+                if prog is None:
+                    s0 = np.zeros(len(i0))
+                    s1 = np.ones(len(i1))
+                else:
+                    s0, s1, _ = prog
+                query = stage_xyz[left][p0[pick]]
+                want_own = (xyz_mode or "lerp").lower() == "own"
+                picked = _local_pick_rows(
+                    query,
+                    stage_xyz[left][i0], stage_X[left][i0], s0,
+                    stage_xyz[right][i1], stage_X[right][i1], s1,
+                    w, rng, knn=int(slice_knn), pool=(x_mode_n == "local_pool"),
+                    return_xyz=want_own,
+                )
+                if want_own:
+                    x, donor_xyz = picked
+                else:
+                    x = picked
+            elif x_mode_n == "gauss":
+                x = _gaussian_interp_rows(
+                    stage_X[left][i0], stage_X[right][i1], w, count, rng, pca, clip_min=0.0,
+                )
+            elif x_mode_n == "pick" or x_mode_n == "slice":
                 n_right = int(rng.binomial(count, np.clip(w, 0.0, 1.0)))
                 take_right = np.zeros(count, dtype=bool)
                 take_right[:n_right] = True
@@ -404,12 +676,22 @@ def ot_interpolate_alloc(
             elif x_mode_n == "lerp":
                 x = (1.0 - w) * stage_X[left][p0[pick]] + w * stage_X[right][p1[pick]]
             else:
-                raise ValueError(f"x_mode must be lerp|pick|slice, got {x_mode}")
+                raise ValueError(
+                    f"x_mode must be lerp|pick|slice|gauss|local_gauss|local_pick|local_pool, got {x_mode}"
+                )
             mode = (xyz_mode or "lerp").lower()
             if mode == "own" and x_mode_n in {"pick", "slice"}:
                 xyz = np.empty((count, stage_xyz[left].shape[1]), dtype=np.float32)
                 xyz[take_right] = stage_xyz[right][p1[pick][take_right]]
                 xyz[~take_right] = stage_xyz[left][p0[pick][~take_right]]
+            elif mode == "own" and x_mode_n in {"local_pick", "local_pool"}:
+                if donor_xyz is None:
+                    raise RuntimeError("local_pick own xyz missing donor coordinates")
+                xyz = np.asarray(donor_xyz, dtype=np.float32)
+            elif mode == "own":
+                raise ValueError(
+                    "xyz_mode=own requires x_mode in {pick, slice, local_pick, local_pool}"
+                )
             elif mode == "left":
                 xyz = stage_xyz[left][p0[pick]]
             elif mode == "right":
