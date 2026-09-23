@@ -55,6 +55,12 @@ def main() -> int:
     ap.add_argument("--pair-cap", type=int, default=1200)
     ap.add_argument("--z-dim", type=int, default=32)
     ap.add_argument("--rms", type=float, default=198.24)
+    ap.add_argument(
+        "--t-scale",
+        type=float,
+        default=None,
+        help="time embedding scale; heart extrap use 4.0 so t=9.5/10.5 stay in range",
+    )
     ap.add_argument("--var-weight", type=float, default=5.0)
     ap.add_argument("--cov-weight", type=float, default=1.0)
     ap.add_argument("--mean-weight", type=float, default=8.0)
@@ -150,6 +156,8 @@ def main() -> int:
         pair_Z = np.concatenate(pz, axis=0)
         print(f"OT pairs n={len(pair_X0)}")
 
+    t_anchor = t0
+    t_scale = float(args.t_scale) if args.t_scale is not None else (abs(t1 - t0) or 1.0)
     device = torch.device(args.device) if args.device else get_device()
     if args.arch == "gen":
         model = CondGen(
@@ -157,8 +165,8 @@ def main() -> int:
             n_clusters=len(ids),
             hidden=args.hidden,
             z_dim=args.z_dim,
-            t_anchor=t0,
-            t_scale=abs(t1 - t0) or 1.0,
+            t_anchor=t_anchor,
+            t_scale=t_scale,
         ).to(device)
     elif args.arch == "ae":
         model = CondAE(
@@ -166,8 +174,8 @@ def main() -> int:
             n_clusters=len(ids),
             hidden=args.hidden,
             z_dim=args.z_dim,
-            t_anchor=t0,
-            t_scale=abs(t1 - t0) or 1.0,
+            t_anchor=t_anchor,
+            t_scale=t_scale,
         ).to(device)
     elif args.arch == "vae":
         model = CondVAE(
@@ -175,16 +183,16 @@ def main() -> int:
             n_clusters=len(ids),
             hidden=args.hidden,
             z_dim=args.z_dim,
-            t_anchor=t0,
-            t_scale=abs(t1 - t0) or 1.0,
+            t_anchor=t_anchor,
+            t_scale=t_scale,
         ).to(device)
     else:
         model = CondFlow(
             n_genes=X.shape[1],
             n_clusters=len(ids),
             hidden=args.hidden,
-            t_anchor=t0,
-            t_scale=abs(t1 - t0) or 1.0,
+            t_anchor=t_anchor,
+            t_scale=t_scale,
         ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sig_t = torch.as_tensor(sigma, device=device)
@@ -286,8 +294,8 @@ def main() -> int:
         "xyz_hidden": 64 if args.arch in {"gen", "vae", "ae"} else 32,
         "z_dim": int(args.z_dim),
         "arch": args.arch,
-        "t_anchor": float(t0),
-        "t_scale": float(abs(t1 - t0) or 1.0),
+        "t_anchor": float(t_anchor),
+        "t_scale": float(t_scale),
         "setting": args.setting,
         "left": args.left,
         "right": args.right,

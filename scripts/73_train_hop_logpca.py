@@ -76,6 +76,12 @@ def main() -> int:
     ap.add_argument("--holdout", type=float, default=0.12)
     ap.add_argument("--device", default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--t-scale",
+        type=float,
+        default=None,
+        help="time embedding scale; heart extrap use 4.0 so t=10.5 stays in range",
+    )
     args = ap.parse_args()
 
     cfg = load_config()
@@ -171,7 +177,9 @@ def main() -> int:
         raise SystemExit("no hops")
 
     t_anchor = t_anchor_for(args.setting)
-    t_scale = 1.25 if args.setting == "embryo" else 0.5
+    t_scale = float(args.t_scale) if args.t_scale is not None else (
+        1.25 if args.setting == "embryo" else 0.5
+    )
     model = Velocity(
         d=k,
         emb_dim=16,

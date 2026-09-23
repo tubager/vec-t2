@@ -339,6 +339,7 @@ crop / occ / **occblend（207：d2 −11.4 且 ODS 还掉）** / 心脏 TPS / `-
 | residual VAE、gene-cov flow、全局 gauss | 合成残差砸 CSS |
 | PCA-OT 插值 / 2-cell lerp / mean-match（206） | 65.12；更像 E7.25 |
 | hop-logpca bidir 真细胞运输（209） | 64.24；留出 NFS/var 大赢是反指标 |
+| **residual-skip 外推（83）** | 身份 mae≤0.003 PASS；全簇 de 来自污染；载体 hop 拧回 last-step；三时刻 W3 过门但 G0 mae 0.0007。**关外推上板，勿交 239** |
 | skip-euler（204）、donor-decode（205） | 小亏或 de 掉 |
 | 尾贴端点真细胞（202） | NFS 崩 |
 | 二次翻转全局 29 基因（201） | de 锁、var −2.2 |
@@ -376,6 +377,8 @@ partial-X、denoise、partial-gene OT、std-blend、local SVD、全量矩变。d
 
 冲第一（73.5 / 63.0 / 72.1，均 69.53）仍缺外推 **5.4**。last-step / 投影族探针结束。锁 234。要继续冲第一必须换 X 族。α=1 仍禁止。
 
+W3 残差工厂后 **237 shrink 56.87 FAIL**。**238 hop-CFM 41.71 穿地板**。CondGen 密度门：均值而非细胞，**不写板**。CondAE 身份门：原生 t 重建 mae 0.26 ≫ 0.03，**停，不写板**。残差 skip：身份重建过门，但 Δ 不能迁到 G0。全簇 / 载体 after-mean / 载体干净 hop / 三时刻 t=10.5 全部 **不写板或勿交**。锁仍 234。**关 residual-skip 外推上板。**
+
 ---
 
 ## 9. 未出分 / 勿当作锁
@@ -408,6 +411,9 @@ partial-X、denoise、partial-gene OT、std-blend、local SVD、全量矩变。d
 | 234 | 外推 只投影 ncc | **已出分 57.57 弱 PASS**；de 锁 54.2。X 已写入 submit/ |
 | 235 | 外推 ncc 投影 ε=0.30 | **已出分 57.57 FAIL**；分项全锁。关 ncc ε 扫。不进 submit |
 | 236 | 外推 ncc 空间 kNN 投影 k=15 | **已出分 57.51 FAIL**；de 54.2→53.7。关局部投影。不进 submit |
+| 237 | 外推 234 + 载体 IFT/pam/peri 向簇均值收缩 λ=0.35 keepz | **已出分 56.87 FAIL**；de 52.8；mmd 50.7。关 shrink。不进 submit |
+| 238 | 外推 234 + hop-CFM 延续 blend=0.50 keepz（IFT/pam/peri） | **已出分 41.71 FAIL（低于地板）**；var 40；mmd 33.9；NFS 32.7。关 hop-CFM。不进 submit |
+| 239 | 外推 234 + 三时刻 skip t=10.5 blend=0.25 keepz | **勿交**；W3 analog mae 0.019 过门，G0 上 mae vs 234=**0.0007**（hop 不点火）。关 skip 外推上板 |
 | 208 | 胚胎 PCA-384 恒等 keep-zeros | 近锁去噪，mae 0.006；**不交** |
 | 211 | 心脏分簇曲率 α=2.5 on196 | **已出分 69.53 FAIL**；de 锁 63.6。关心脏曲率 |
 | 210 | 胚胎分簇二次−线性 keep-zeros | **已出分 69.67 PASS**；de 60.2。X 已写入 submit/ |
